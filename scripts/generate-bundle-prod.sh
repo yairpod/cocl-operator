@@ -22,7 +22,7 @@ done
 [[ -z "$BUNDLE_VERSION" ]] && { echo "Error: bundle version cannot be empty"; exit 1; }
 
 # Required environment variables
-for var in OPERATOR_IMAGE COMPUTE_PCRS_IMAGE REG_SERVER_IMAGE; do
+for var in OPERATOR_IMAGE COMPUTE_PCRS_IMAGE REG_SERVER_IMAGE TRUSTEE_IMAGE; do
     : "${!var:?Please export $var}"
 done
 
@@ -32,7 +32,7 @@ BUNDLE_MANIFESTS="${BUNDLE_DIR}/manifests"
 BUNDLE_METADATA="${BUNDLE_DIR}/metadata"
 CSV_TEMPLATE="${PROJECT_ROOT}/bundle/static/manifests/trusted-cluster-operator.clusterserviceversion.yaml"
 ANNOTATIONS_TEMPLATE="${PROJECT_ROOT}/bundle/static/metadata/annotations.yaml"
-RBAC_ROLE_FILE="${PROJECT_ROOT}/config/rbac/role.yaml"
+RBAC_ROLE_FILE="${PROJECT_ROOT}/config/rbac/base/role.yaml"
 
 echo "=> Cleaning previous bundle..."
 rm -rf "${BUNDLE_MANIFESTS}" "${BUNDLE_METADATA}"
@@ -41,9 +41,13 @@ mkdir -p "${BUNDLE_MANIFESTS}" "${BUNDLE_METADATA}"
 echo "=> Copying CRDs and static assets..."
 shopt -s nullglob
 cp "${PROJECT_ROOT}/config/crd"/*.yaml "${BUNDLE_MANIFESTS}/"
-cp "${PROJECT_ROOT}/config/rbac"/*.yaml "${BUNDLE_MANIFESTS}/"
+cp "${PROJECT_ROOT}/config/rbac/base"/*.yaml "${BUNDLE_MANIFESTS}/"
 rm -f "${BUNDLE_MANIFESTS}/kustomization.yaml"
 rm -f "${BUNDLE_MANIFESTS}/service_account.yaml"
+# Remove operator's main RBAC files - these are defined in CSV's clusterPermissions instead
+# This prevents OLM from creating duplicate ClusterRoles and ClusterRoleBindings
+rm -f "${BUNDLE_MANIFESTS}/role.yaml"
+rm -f "${BUNDLE_MANIFESTS}/role_binding.yaml"
 cp "$CSV_TEMPLATE" "${BUNDLE_MANIFESTS}/"
 cp "$ANNOTATIONS_TEMPLATE" "${BUNDLE_METADATA}/"
 
@@ -58,10 +62,11 @@ yq -i ".metadata.annotations.containerImage = \"${OPERATOR_IMAGE}\"" "$CSV_FILE"
 # Patch deployment container image
 yq -i ".spec.install.spec.deployments[0].spec.template.spec.containers[0].image = \"${OPERATOR_IMAGE}\"" "$CSV_FILE"
 
-# Patch environment variables
-for env_var in COMPUTE_PCRS_IMAGE REG_SERVER_IMAGE; do
-  yq -i "(.spec.install.spec.deployments[0].spec.template.spec.containers[0].env[] | select(.name == \"$env_var\")).value = \"${!env_var}\"" "$CSV_FILE"
-done
+# Patch relatedImages section for air-gapped environments
+yq -i "(.spec.relatedImages[] | select(.name == \"trusted-cluster-operator\")).image = \"${OPERATOR_IMAGE}\"" "$CSV_FILE"
+yq -i "(.spec.relatedImages[] | select(.name == \"compute-pcrs\")).image = \"${COMPUTE_PCRS_IMAGE}\"" "$CSV_FILE"
+yq -i "(.spec.relatedImages[] | select(.name == \"registration-server\")).image = \"${REG_SERVER_IMAGE}\"" "$CSV_FILE"
+yq -i "(.spec.relatedImages[] | select(.name == \"trustee\")).image = \"${TRUSTEE_IMAGE}\"" "$CSV_FILE"
 
 # Patch RBAC rules
 yq -i ".spec.install.spec.clusterPermissions[0].rules = load(\"${RBAC_ROLE_FILE}\").rules" "$CSV_FILE"
