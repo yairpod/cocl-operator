@@ -1,0 +1,33 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Jakob Naucke <jnaucke@redhat.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
+set -euo pipefail
+
+KUBECTL="${KUBECTL:-kubectl}"
+COLLECTION_PATH="${COLLECTION_PATH:-.}"
+
+mkdir -p "${COLLECTION_PATH}/logs"
+
+for ns in $(${KUBECTL} get namespaces -o jsonpath={..metadata.name}); do
+	for deployment in trusted-cluster-operator register-server trustee-deployment; do
+		if ${KUBECTL} get deployment "${deployment}" -n "${ns}" &> /dev/null; then
+			${KUBECTL} logs deployment/"${deployment}" -n "${ns}" --all-containers=true &> \
+			           "${COLLECTION_PATH}/logs/${deployment}-${ns}.log"
+		fi
+	done
+
+	for resource in trustedexecutioncluster approvedimage machine virtualmachine virtualmachineinstance; do
+		if ${KUBECTL} get "${resource}" -n "${ns}" --ignore-not-found 2> /dev/null | grep -q .; then
+			${KUBECTL} get "${resource}" -n "${ns}" -o yaml &> "${COLLECTION_PATH}/${resource}-${ns}.yml"
+		fi
+	done
+
+	virt_pods=$(${KUBECTL} get pods -n "${ns}" -l kubevirt.io -o jsonpath={..metadata.name} \
+	            --ignore-not-found)
+	for pod in $virt_pods; do
+		${KUBECTL} logs "${pod}" -n "${ns}" --all-containers=true &> \
+		           "${COLLECTION_PATH}/logs/${pod}-${ns}.log"
+	done
+done

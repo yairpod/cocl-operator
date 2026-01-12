@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Jakob Naucke <jnaucke@redhat.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
+FROM quay.io/openshift/origin-cli:latest
+COPY gather /usr/bin/gather
+ENV KUBECTL oc
+ENV COLLECTION_PATH /must-gather
+ENTRYPOINT ["/usr/bin/gather"]
