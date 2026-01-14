@@ -244,7 +244,8 @@ async fn test_vm_reboot_attestation() -> anyhow::Result<()> {
         )
         .await;
 
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        test_ctx.info(format!("Waiting for lack of SSH access after reboot {}", i));
+        virt::wait_for_vm_ssh_unavail(namespace, vm_name, &att_ctx.key_path, 30).await?;
 
         test_ctx.info(format!("Waiting for SSH access after reboot {}", i));
         virt::wait_for_vm_ssh_ready(namespace, vm_name, &att_ctx.key_path, 300).await?;
@@ -274,7 +275,6 @@ async fn test_vm_reboot_attestation() -> anyhow::Result<()> {
 
 virt_test! {
 async fn test_vm_reboot_delete_machine() -> anyhow::Result<()> {
-    use kube::Api;
     use trusted_cluster_operator_lib::Machine;
 
     let test_ctx = setup!().await?;
@@ -297,7 +297,8 @@ async fn test_vm_reboot_delete_machine() -> anyhow::Result<()> {
     )
     .await;
 
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    test_ctx.info("Waiting for lack of SSH access after reboot");
+    virt::wait_for_vm_ssh_unavail(test_ctx.namespace(), vm_name, &att_ctx.key_path, 30).await?;
 
     test_ctx.info("Waiting for SSH access after machine removal");
     let wait = virt::wait_for_vm_ssh_ready(

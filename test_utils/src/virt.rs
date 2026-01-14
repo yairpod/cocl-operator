@@ -333,12 +333,32 @@ pub async fn wait_for_vm_ssh_ready(
     key_path: &Path,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
+    wait_for_vm_ssh(namespace, vm_name, key_path, timeout_secs, true).await
+}
+
+pub async fn wait_for_vm_ssh_unavail(
+    namespace: &str,
+    vm_name: &str,
+    key_path: &Path,
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    wait_for_vm_ssh(namespace, vm_name, key_path, timeout_secs, false).await
+}
+
+async fn wait_for_vm_ssh(
+    namespace: &str,
+    vm_name: &str,
+    key_path: &Path,
+    timeout_secs: u64,
+    await_start: bool,
+) -> anyhow::Result<()> {
+    let avail_prefix = if await_start { "" } else { "un" };
     let poller = Poller::new()
         .with_timeout(Duration::from_secs(timeout_secs))
         .with_interval(Duration::from_secs(10))
         .with_error_message(format!(
-            "SSH access to VM {}/{} did not become available after {} seconds",
-            namespace, vm_name, timeout_secs
+            "SSH access to VM {}/{} did not become {}available after {} seconds",
+            namespace, vm_name, avail_prefix, timeout_secs
         ));
 
     poller
@@ -348,10 +368,10 @@ pub async fn wait_for_vm_ssh_ready(
             let key = key_path.to_path_buf();
             async move {
                 // Try a simple command to check if SSH is ready
-                match virtctl_ssh_exec(&ns, &vm, &key, "echo ready").await {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(anyhow::anyhow!("SSH not ready yet: {}", e)),
-                }
+                let result = virtctl_ssh_exec(&ns, &vm, &key, "echo ready").await;
+                (result.is_err() ^ await_start)
+                    .then_some(())
+                    .ok_or(anyhow::anyhow!("SSH not desired state yet: {result:?}"))
             }
         })
         .await
