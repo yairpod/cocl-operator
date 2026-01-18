@@ -2,14 +2,13 @@
 //
 // SPDX-License-Identifier: MIT
 
+use fs_extra::dir;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use kube::api::DeleteParams;
 use kube::{Api, Client};
-use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Once;
-use std::time::Duration;
+use std::{collections::BTreeMap, env, sync::Once, time::Duration};
 use tokio::process::Command;
 
 pub mod timer;
@@ -70,6 +69,39 @@ macro_rules! kube_apply {
             return Err(anyhow::anyhow!("{} failed: {}", $log, stderr));
         }
     }
+}
+
+trait K8sPlatform {
+    fn add_scc(&self, kustomization: &mut serde_yaml::Value);
+}
+
+struct Kind {}
+struct OpenShift {}
+struct OtherK8s {}
+
+fn get_k8s_platform() -> Box<dyn K8sPlatform> {
+    match env::var("PLATFORM").as_deref().unwrap_or("kind") {
+        "kind" => Box::new(Kind {}),
+        "openshift" => Box::new(OpenShift {}),
+        _ => Box::new(OtherK8s {}),
+    }
+}
+
+impl K8sPlatform for Kind {
+    fn add_scc(&self, _: &mut serde_yaml::Value) {}
+}
+
+impl K8sPlatform for OpenShift {
+    fn add_scc(&self, kustomization: &mut serde_yaml::Value) {
+        let err = "unexpected kustomization";
+        let resources = kustomization.get_mut("resources").expect(err);
+        let resource_seq = resources.as_sequence_mut().expect(err);
+        resource_seq.push(serde_yaml::Value::String("scc.yaml".to_string()))
+    }
+}
+
+impl K8sPlatform for OtherK8s {
+    fn add_scc(&self, _: &mut serde_yaml::Value) {}
 }
 
 static INIT: Once = Once::new();
@@ -171,7 +203,7 @@ impl TestContext {
     }
 
     fn create_temp_manifests_dir(&self) -> anyhow::Result<String> {
-        let temp_dir = std::env::temp_dir();
+        let temp_dir = env::temp_dir();
         let manifests_dir = temp_dir.join(format!("manifests-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&manifests_dir)?;
         let dir_str = manifests_dir
@@ -250,7 +282,7 @@ impl TestContext {
         );
 
         let ns = self.test_namespace.clone();
-        let workspace_root = std::env::current_dir()?.join("..");
+        let workspace_root = env::current_dir()?.join("..");
         let controller_gen_path = workspace_root.join("bin/controller-gen-v0.19.0");
 
         test_info!(
@@ -260,9 +292,11 @@ impl TestContext {
         );
 
         let crd_temp_dir = Path::new(&self.manifests_dir).join("crd");
+        let rbac_dir = workspace_root.join("config/rbac/");
+        let options = dir::CopyOptions::new();
+        dir::copy(rbac_dir, &self.manifests_dir, &options)?;
         let rbac_temp_dir = Path::new(&self.manifests_dir).join("rbac");
         std::fs::create_dir_all(&crd_temp_dir)?;
-        std::fs::create_dir_all(&rbac_temp_dir)?;
 
         let crd_temp_dir_str = crd_temp_dir
             .to_str()
@@ -300,7 +334,8 @@ impl TestContext {
                 trusted_cluster_gen_path.display()
             ));
         }
-
+        let repo = env::var("REGISTRY").unwrap_or_else(|_| "localhost:5000".to_string());
+        let tag = env::var("TAG").unwrap_or_else(|_| "latest".to_string());
         let manifest_gen_output = Command::new(&trusted_cluster_gen_path)
             .args([
                 "-namespace",
@@ -308,21 +343,20 @@ impl TestContext {
                 "-output-dir",
                 &self.manifests_dir,
                 "-image",
-                "localhost:5000/trusted-execution-clusters/trusted-cluster-operator:latest",
+                &format!("{repo}/trusted-cluster-operator:{tag}"),
                 "-pcrs-compute-image",
-                "localhost:5000/trusted-execution-clusters/compute-pcrs:latest",
+                &format!("{repo}/compute-pcrs:{tag}"),
                 "-trustee-image",
                 "quay.io/trusted-execution-clusters/key-broker-service:20260106",
                 "-register-server-image",
-                "localhost:5000/trusted-execution-clusters/registration-server:latest",
+                &format!("{repo}/registration-server:{tag}"),
                 "-attestation-key-register-image",
-                "localhost:5000/trusted-execution-clusters/attestation-key-register:latest",
+                &format!("{repo}/attestation-key-register:{tag}"),
                 "-approved-image",
                 "quay.io/trusted-execution-clusters/fedora-coreos@sha256:79a0657399e6c67c7c95b8a09193d18e5675b5aa3cfb4d75ea5c8d4d53b2af74"
             ])
             .output()
             .await?;
-
         if !manifest_gen_output.status.success() {
             let stderr = String::from_utf8_lossy(&manifest_gen_output.stderr);
             return Err(anyhow::anyhow!("Failed to generate manifests: {stderr}"));
@@ -395,24 +429,24 @@ impl TestContext {
         std::fs::write(&le_rb_dst, le_rb_content)?;
 
         test_info!(&self.test_name, "Preparing RBAC kustomization");
-        let kustomization_content = format!(
-            r#"# SPDX-FileCopyrightText: Generated for testing
-# SPDX-License-Identifier: CC0-1.0
-
-namespace: {}
-
-resources:
-  - service_account.yaml
-  - role.yaml
-  - role_binding.yaml
-  - leader_election_role.yaml
-  - leader_election_role_binding.yaml
-"#,
-            ns
-        );
-
+        let platform = get_k8s_platform();
+        let kustomization_src = workspace_root.join("config/rbac/kustomization.yaml.in");
+        let kustomization_content = std::fs::read_to_string(&kustomization_src)?;
+        let mut kustom_value: serde_yaml::Value = serde_yaml::from_str(&kustomization_content)?;
+        let err = "unexpected kustomization";
+        let kustom_map = kustom_value.as_mapping_mut().expect(err);
+        let kustom_ns_key = serde_yaml::Value::String("namespace".to_string());
+        kustom_map.insert(kustom_ns_key, serde_yaml::Value::String(ns.clone()));
+        platform.add_scc(&mut kustom_value);
+        let kustomization_target = serde_yaml::to_string(&kustom_value)?;
         let temp_kustomization_path = rbac_temp_dir.join("kustomization.yaml");
-        std::fs::write(&temp_kustomization_path, kustomization_content)?;
+        std::fs::write(&temp_kustomization_path, kustomization_target)?;
+
+        let scc_openshift_rb_src = workspace_root.join("config/openshift/scc.yaml");
+        let scc_openshift_rb_content =
+            std::fs::read_to_string(&scc_openshift_rb_src)?.replace("<NAMESPACE>", &ns);
+        let scc_openshift_rb_dst = rbac_temp_dir.join("scc.yaml");
+        std::fs::write(&scc_openshift_rb_dst, scc_openshift_rb_content)?;
 
         kube_apply!(
             rbac_temp_dir_str,
@@ -436,7 +470,9 @@ resources:
             &self.test_name,
             "Updating CR manifest with publicTrusteeAddr"
         );
-        let trustee_addr = format!("kbs-service.{}.svc.cluster.local:8080", ns);
+        let cluster_url =
+            env::var("CLUSTER_URL").unwrap_or_else(|_| "svc.cluster.local".to_string());
+        let trustee_addr = format!("kbs-service.{}.{}:8080", ns, cluster_url);
         let cr_manifest_path = manifests_path.join("trusted_execution_cluster_cr.yaml");
 
         let cr_content = std::fs::read_to_string(&cr_manifest_path)?;
