@@ -28,8 +28,8 @@ COMPUTE_PCRS_IMAGE=$(REGISTRY)/compute-pcrs:$(TAG)
 REG_SERVER_IMAGE=$(REGISTRY)/registration-server:$(TAG)
 ATTESTATION_KEY_REGISTER_IMAGE=$(REGISTRY)/attestation-key-register:$(TAG)
 TRUSTEE_IMAGE ?= quay.io/trusted-execution-clusters/key-broker-service:20260106
-# tagged as 42.20250705.3.0
-APPROVED_IMAGE ?= quay.io/fedora/fedora-coreos@sha256:8f11c87187dfe83145001e9571948f9ab466e9f4a8b1e092a4798e5db1030dc3
+# tagged as 2026-01-20-attestation
+APPROVED_IMAGE ?= quay.io/trusted-execution-clusters/fedora-coreos@sha256:79a0657399e6c67c7c95b8a09193d18e5675b5aa3cfb4d75ea5c8d4d53b2af74
 
 BUILD_TYPE ?= release
 
