@@ -318,7 +318,7 @@ impl TestContext {
                 "-attestation-key-register-image",
                 "localhost:5000/trusted-execution-clusters/attestation-key-register:latest",
                 "-approved-image",
-                "quay.io/fedora/fedora-coreos@sha256:8f11c87187dfe83145001e9571948f9ab466e9f4a8b1e092a4798e5db1030dc3"
+                "quay.io/trusted-execution-clusters/fedora-coreos@sha256:79a0657399e6c67c7c95b8a09193d18e5675b5aa3cfb4d75ea5c8d4d53b2af74"
             ])
             .output()
             .await?;
