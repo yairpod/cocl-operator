@@ -11,9 +11,12 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
 use std::{env, path::PathBuf, time::Duration};
 use tokio::process::Command;
-use trusted_cluster_operator_lib::Machine;
+
+use endpoints::*;
+use trusted_cluster_operator_lib::*;
 
 use super::Poller;
+use crate::{get_cluster_url, get_env};
 
 /// Environment variable name for selecting the VM provider
 pub const VIRT_PROVIDER_ENV: &str = "VIRT_PROVIDER";
@@ -71,17 +74,19 @@ pub fn generate_ssh_key_pair() -> Result<(String, PathBuf)> {
     Ok((public_key_str, key_path))
 }
 
-pub fn generate_ignition(config: &VmConfig, with_ak: bool) -> serde_json::Value {
+pub async fn generate_ignition(config: &VmConfig, with_ak: bool) -> Result<serde_json::Value> {
     use ignition_config::v3_5::*;
-    let register_server_url = format!(
-        "http://register-server.{}.svc.cluster.local:8000/ignition-clevis-pin-trustee",
-        config.namespace
-    );
+    let client = config.client.clone();
+    let ns = &config.namespace;
+    let register_server_url =
+        get_cluster_url(client, ns, REGISTER_SERVER_SERVICE, REGISTER_SERVER_PORT).await?;
     let ignition = Ignition {
         version: "3.6.0-experimental".to_string(),
         config: Some(IgnitionConfig {
             merge: Some(vec![Resource {
-                source: Some(register_server_url),
+                source: Some(format!(
+                    "http://{register_server_url}/{REGISTER_SERVER_RESOURCE}"
+                )),
                 ..Default::default()
             }]),
             ..Default::default()
@@ -121,24 +126,29 @@ pub fn generate_ignition(config: &VmConfig, with_ak: bool) -> serde_json::Value 
 
     let mut ignition_json = serde_json::to_value(&ignition_config).unwrap();
     if with_ak {
-        ignition_json = patch_ak(&config.namespace, ignition_json);
+        ignition_json = patch_ak(config.client.clone(), ns, ignition_json).await?;
     }
-    ignition_json
+    Ok(ignition_json)
 }
 
-fn patch_ak(namespace: &str, mut ignition: serde_json::Value) -> serde_json::Value {
-    let attestation_url =
-        format!("http://attestation-key-register.{namespace}.svc.cluster.local:8001/register-ak",);
+async fn patch_ak(
+    client: Client,
+    namespace: &str,
+    mut ignition: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let svc = ATTESTATION_KEY_REGISTER_SERVICE;
+    let port = ATTESTATION_KEY_REGISTER_PORT;
+    let attestation_url = get_cluster_url(client, namespace, svc, port).await?;
     let ign_json = serde_json::json!({
         "attestation_key": {
             "registration": {
-                "url": attestation_url
+                "url": format!("http://{attestation_url}/{ATTESTATION_KEY_REGISTER_RESOURCE}"),
             }
         }
     });
     let obj = ignition.as_object_mut().unwrap();
     obj.insert("attestation".to_string(), ign_json);
-    ignition
+    Ok(ignition)
 }
 
 pub async fn ssh_exec(command: &str) -> Result<String> {
@@ -191,13 +201,14 @@ pub fn create_backend(
 ) -> Result<Box<dyn VmBackend>> {
     let provider = get_virt_provider()?;
     let (public_key, key_path) = generate_ssh_key_pair()?;
+    let image = get_env("TEST_IMAGE")?;
     let config = VmConfig {
         client,
         namespace: namespace.to_string(),
         vm_name: vm_name.to_string(),
         ssh_public_key: public_key,
         ssh_private_key: key_path,
-        image: "quay.io/trusted-execution-clusters/fedora-coreos-kubevirt:20260129".to_string(),
+        image,
     };
     match provider {
         VirtProvider::Kubevirt => Ok(Box::new(kubevirt::KubevirtBackend(config))),

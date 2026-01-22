@@ -1,16 +1,21 @@
 // SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+// SPDX-FileCopyrightText: Jakob Naucke <jnaucke@redhat.com>
 //
 // SPDX-License-Identifier: MIT
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use fs_extra::dir;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use kube::api::DeleteParams;
 use kube::{Api, Client};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{collections::BTreeMap, env, sync::Once, time::Duration};
 use tokio::process::Command;
+
+use trusted_cluster_operator_lib::endpoints::*;
+use trusted_cluster_operator_lib::openshift_ingresses::Ingress;
+use trusted_cluster_operator_lib::routes::Route;
 
 pub mod timer;
 pub use timer::Poller;
@@ -21,6 +26,9 @@ pub mod virt;
 
 use compute_pcrs_lib::Pcr;
 
+const PLATFORM_ENV: &str = "PLATFORM";
+const CLUSTER_URL_ENV: &str = "CLUSTER_URL";
+const YELLOW: &str = "\x1b[33m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 pub fn compare_pcrs(actual: &[Pcr], expected: &[Pcr]) -> bool {
@@ -48,13 +56,12 @@ macro_rules! test_info {
 #[macro_export]
 macro_rules! test_warn {
     ($test_name:expr, $($arg:tt)*) => {{
-        const YELLOW: &str = "\x1b[33m";
-        println!("{}WARN{}: {}: {}", YELLOW, ANSI_RESET, $test_name, format!($($arg)*));
+        println!("{YELLOW}WARN{ANSI_RESET}: {}: {}", $test_name, format!($($arg)*));
     }}
 }
 
 macro_rules! kube_apply {
-    ($file:expr, $test_name:expr, $log:literal $(, kustomize = $kustomize:literal)? $(, fssa = $fssa:literal)?) => {
+    ($file:expr, $test_name:expr, $log:expr $(, kustomize = $kustomize:literal)? $(, fssa = $fssa:literal)?) => {
         test_info!($test_name, $log);
         #[allow(unused_mut)]
         let mut opt = "-f";
@@ -76,18 +83,32 @@ macro_rules! kube_apply {
             .await?;
         if !apply_output.status.success() {
             let stderr = String::from_utf8_lossy(&apply_output.stderr);
-            return Err(anyhow::anyhow!("{} failed: {}", $log, stderr));
+            return Err(anyhow!("{} failed: {}", $log, stderr));
         }
     }
 }
 
-pub fn ensure_command(name: &str) -> anyhow::Result<()> {
+fn get_env(name: &str) -> Result<String> {
+    env::var(name).map_err(|e| anyhow!("Environment variable {name} is required: {e}"))
+}
+
+pub fn ensure_command(name: &str) -> Result<()> {
     let result = which::which(name).map(|_| ());
     result.map_err(|_| anyhow!("Command {name} not found. Please install {name} first."))
 }
 
-trait K8sPlatform {
+#[async_trait::async_trait]
+#[auto_impl::auto_impl(Box)]
+trait K8sPlatform: Send + Sync {
     fn add_scc(&self, kustomization: &mut serde_yaml::Value);
+    async fn expose(&self, namespace: &str, service: &str, test_name: &str) -> Result<()>;
+    async fn get_cluster_url(
+        &self,
+        client: Client,
+        namespace: &str,
+        service: &str,
+        port: i32,
+    ) -> Result<String>;
 }
 
 struct Kind {}
@@ -102,10 +123,25 @@ fn get_k8s_platform() -> Box<dyn K8sPlatform> {
     }
 }
 
+#[async_trait::async_trait]
 impl K8sPlatform for Kind {
     fn add_scc(&self, _: &mut serde_yaml::Value) {}
+    async fn expose(&self, _: &str, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_cluster_url(
+        &self,
+        _: Client,
+        namespace: &str,
+        service: &str,
+        port: i32,
+    ) -> Result<String> {
+        Ok(format!("{service}.{namespace}.svc.cluster.local:{port}"))
+    }
 }
 
+#[async_trait::async_trait]
 impl K8sPlatform for OpenShift {
     fn add_scc(&self, kustomization: &mut serde_yaml::Value) {
         let err = "unexpected kustomization";
@@ -113,10 +149,67 @@ impl K8sPlatform for OpenShift {
         let resource_seq = resources.as_sequence_mut().expect(err);
         resource_seq.push(serde_yaml::Value::String("scc.yaml".to_string()))
     }
+
+    async fn expose(&self, namespace: &str, service: &str, _: &str) -> Result<()> {
+        ensure_command("oc")?;
+        let args = ["expose", "service", service, "-n", namespace];
+        let output = Command::new("oc").args(args).output().await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("oc command failed: {stderr}"));
+        }
+        Ok(())
+    }
+
+    async fn get_cluster_url(
+        &self,
+        client: Client,
+        namespace: &str,
+        service: &str,
+        _: i32,
+    ) -> Result<String> {
+        let routes: Api<Route> = Api::namespaced(client.clone(), namespace);
+        if let Ok(route) = routes.get(service).await {
+            return Ok(route.spec.host.expect("route existed, but had no host"));
+        }
+        // Fallback when route does not exist yet
+        let ingresses: Api<Ingress> = Api::all(client);
+        let ingress = ingresses.get("cluster").await?;
+        let domain = ingress.spec.domain.unwrap();
+        Ok(format!("{service}-{namespace}.{domain}"))
+    }
 }
 
+#[async_trait::async_trait]
 impl K8sPlatform for OtherK8s {
     fn add_scc(&self, _: &mut serde_yaml::Value) {}
+
+    async fn expose(&self, _: &str, _: &str, test_name: &str) -> Result<()> {
+        let warn = "You appear to be on an environment that is not Kind or OpenShift. \
+                    Ensure operator are services are reachable";
+        test_warn!(test_name, "{warn}");
+        Ok(())
+    }
+
+    async fn get_cluster_url(&self, _: Client, _: &str, _: &str, _: i32) -> Result<String> {
+        Err(anyhow!(
+            "Set {CLUSTER_URL_ENV} when {PLATFORM_ENV} is not one of: kind, openshift"
+        ))
+    }
+}
+
+pub async fn get_cluster_url(
+    client: Client,
+    namespace: &str,
+    service: &str,
+    port: i32,
+) -> Result<String> {
+    if let Ok(url) = env::var(CLUSTER_URL_ENV) {
+        return Ok(format!("{service}.{namespace}.{url}:{port}"));
+    }
+    get_k8s_platform()
+        .get_cluster_url(client, namespace, service, port)
+        .await
 }
 
 static INIT: Once = Once::new();
@@ -129,7 +222,7 @@ pub struct TestContext {
 }
 
 impl TestContext {
-    pub async fn new(test_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(test_name: &str) -> Result<Self> {
         INIT.call_once(|| {
             let _ = env_logger::builder().is_test(true).try_init();
         });
@@ -176,13 +269,13 @@ impl TestContext {
         test_warn!(&self.test_name, "{}", message);
     }
 
-    pub async fn cleanup(&self) -> anyhow::Result<()> {
+    pub async fn cleanup(&self) -> Result<()> {
         self.cleanup_namespace().await?;
         self.cleanup_manifests_dir()?;
         Ok(())
     }
 
-    async fn create_namespace(&self) -> anyhow::Result<()> {
+    async fn create_namespace(&self) -> Result<()> {
         test_info!(
             &self.test_name,
             "Creating test namespace: {}",
@@ -204,7 +297,7 @@ impl TestContext {
         Ok(())
     }
 
-    async fn cleanup_namespace(&self) -> anyhow::Result<()> {
+    async fn cleanup_namespace(&self) -> Result<()> {
         let namespace_api: Api<Namespace> = Api::all(self.client.clone());
         let dp = DeleteParams::default();
 
@@ -221,23 +314,19 @@ impl TestContext {
         Ok(())
     }
 
-    fn create_temp_manifests_dir(&self) -> anyhow::Result<String> {
+    fn create_temp_manifests_dir(&self) -> Result<String> {
         let temp_dir = env::temp_dir();
         let manifests_dir = temp_dir.join(format!("manifests-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&manifests_dir)?;
-        let dir_str = manifests_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid temp directory path"))?
-            .to_string();
+        let dir_str = manifests_dir.to_str().unwrap();
         test_info!(
             &self.test_name,
-            "Created temp manifests directory: {}",
-            dir_str
+            "Created temp manifests directory: {dir_str}",
         );
-        Ok(dir_str)
+        Ok(dir_str.to_string())
     }
 
-    fn cleanup_manifests_dir(&self) -> anyhow::Result<()> {
+    fn cleanup_manifests_dir(&self) -> Result<()> {
         if Path::new(&self.manifests_dir).exists() {
             std::fs::remove_dir_all(&self.manifests_dir)?;
             test_info!(
@@ -254,7 +343,7 @@ impl TestContext {
         deployments_api: &Api<Deployment>,
         deployment_name: &str,
         timeout_secs: u64,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         test_info!(
             &self.test_name,
             "Waiting for deployment {} to be ready",
@@ -285,7 +374,7 @@ impl TestContext {
                         }
                     }
 
-                    Err(anyhow::anyhow!(
+                    Err(anyhow!(
                         "{name} deployment does not have 1 available replica yet"
                     ))
                 }
@@ -293,15 +382,8 @@ impl TestContext {
             .await
     }
 
-    async fn apply_operator_manifests(&self) -> anyhow::Result<()> {
-        test_info!(
-            &self.test_name,
-            "Generating manifests in {}",
-            self.manifests_dir
-        );
-
+    async fn generate_manifests(&self, workspace_root: &PathBuf) -> Result<(PathBuf, PathBuf)> {
         let ns = self.test_namespace.clone();
-        let workspace_root = env::current_dir()?.join("..");
         let controller_gen_path = workspace_root.join("bin/controller-gen-v0.19.0");
 
         test_info!(
@@ -317,80 +399,67 @@ impl TestContext {
         let rbac_temp_dir = Path::new(&self.manifests_dir).join("rbac");
         std::fs::create_dir_all(&crd_temp_dir)?;
 
-        let crd_temp_dir_str = crd_temp_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid CRD temp directory path"))?;
-        let rbac_temp_dir_str = rbac_temp_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid RBAC temp directory path"))?;
+        let crd_temp_dir_str = crd_temp_dir.to_str().unwrap();
+        let rbac_temp_dir_str = rbac_temp_dir.to_str().unwrap();
 
-        let crd_gen_output = Command::new(&controller_gen_path)
-            .args([
-                "rbac:roleName=trusted-cluster-operator-role",
-                "crd",
-                "webhook",
-                "paths=./...",
-                &format!("output:crd:artifacts:config={crd_temp_dir_str}"),
-                &format!("output:rbac:artifacts:config={rbac_temp_dir_str}"),
-            ])
-            .current_dir(&workspace_root)
-            .output()
-            .await?;
+        let role_name = "rbac:roleName=trusted-cluster-operator-role";
+        let mut args = vec![&role_name, "crd", "webhook", "paths=./..."];
+        let crd_artifacts = format!("output:crd:artifacts:config={crd_temp_dir_str}");
+        let rbac_artifacts = format!("output:rbac:artifacts:config={rbac_temp_dir_str}");
+        args.extend_from_slice(&[&crd_artifacts, &rbac_artifacts]);
+        let mut crd_gen_cmd = Command::new(&controller_gen_path);
+        let crd_gen = crd_gen_cmd.args(args).current_dir(workspace_root).output();
+        let crd_gen_output = crd_gen.await?;
 
         if !crd_gen_output.status.success() {
             let stderr = String::from_utf8_lossy(&crd_gen_output.stderr);
-            return Err(anyhow::anyhow!(
-                "Failed to generate CRDs and RBAC: {stderr}"
-            ));
+            return Err(anyhow!("Failed to generate CRDs and RBAC: {stderr}"));
         }
 
         test_info!(&self.test_name, "CRDs and RBAC generated successfully");
 
         let trusted_cluster_gen_path = workspace_root.join("trusted-cluster-gen");
         if !trusted_cluster_gen_path.exists() {
-            return Err(anyhow::anyhow!(
+            return Err(anyhow!(
                 "trusted-cluster-gen not found at {}. Run 'make trusted-cluster-gen' first.",
                 trusted_cluster_gen_path.display()
             ));
         }
         let repo = env::var("REGISTRY").unwrap_or_else(|_| "localhost:5000".to_string());
         let tag = env::var("TAG").unwrap_or_else(|_| "latest".to_string());
-        let manifest_gen_output = Command::new(&trusted_cluster_gen_path)
-            .args([
-                "-namespace",
-                &ns,
-                "-output-dir",
-                &self.manifests_dir,
-                "-image",
-                &format!("{repo}/trusted-cluster-operator:{tag}"),
-                "-pcrs-compute-image",
-                &format!("{repo}/compute-pcrs:{tag}"),
-                "-trustee-image",
-                "quay.io/trusted-execution-clusters/key-broker-service:20260106",
-                "-register-server-image",
-                &format!("{repo}/registration-server:{tag}"),
-                "-attestation-key-register-image",
-                &format!("{repo}/attestation-key-register:{tag}"),
-                "-approved-image",
-                "quay.io/trusted-execution-clusters/fedora-coreos@sha256:79a0657399e6c67c7c95b8a09193d18e5675b5aa3cfb4d75ea5c8d4d53b2af74"
-            ])
-            .output()
-            .await?;
+        let trustee_image = get_env("TRUSTEE_IMAGE")?;
+        let approved_image = get_env("APPROVED_IMAGE")?;
+
+        let mut args = vec!["-namespace", &ns, "-output-dir", &self.manifests_dir];
+        let operator_img = format!("{repo}/trusted-cluster-operator:{tag}");
+        let compute_pcrs_img = format!("{repo}/compute-pcrs:{tag}");
+        let reg_srv_img = format!("{repo}/registration-server:{tag}");
+        let att_reg_img = format!("{repo}/attestation-key-register:{tag}");
+        args.extend(&["-image", &operator_img]);
+        args.extend(&["-pcrs-compute-image", &compute_pcrs_img]);
+        args.extend(&["-trustee-image", &trustee_image]);
+        args.extend(&["-register-server-image", &reg_srv_img]);
+        args.extend(&["-attestation-key-register-image", &att_reg_img]);
+        args.extend(&["-approved-image", &approved_image]);
+        let manifest_gen = Command::new(&trusted_cluster_gen_path).args(args).output();
+        let manifest_gen_output = manifest_gen.await?;
         if !manifest_gen_output.status.success() {
             let stderr = String::from_utf8_lossy(&manifest_gen_output.stderr);
-            return Err(anyhow::anyhow!("Failed to generate manifests: {stderr}"));
+            return Err(anyhow!("Failed to generate manifests: {stderr}"));
         }
+        Ok((crd_temp_dir, rbac_temp_dir))
+    }
 
+    async fn apply_operator_manifests(&self) -> Result<()> {
+        let manifests_dir = &self.manifests_dir;
+        test_info!(&self.test_name, "Generating manifests in {manifests_dir}");
+        let workspace_root = env::current_dir()?.join("..");
+        let (crd_temp_dir, rbac_temp_dir) = self.generate_manifests(&workspace_root).await?;
         test_info!(&self.test_name, "Manifests generated successfully");
 
-        let crd_check_output = Command::new("kubectl")
-            .args([
-                "get",
-                "crd",
-                "trustedexecutionclusters.trusted-execution-clusters.io",
-            ])
-            .output()
-            .await?;
+        let tec = "trustedexecutionclusters.trusted-execution-clusters.io";
+        let args = ["get", "crd", tec];
+        let crd_check_output = Command::new("kubectl").args(args).output().await?;
 
         if crd_check_output.status.success() {
             test_info!(
@@ -399,7 +468,7 @@ impl TestContext {
             );
         } else {
             kube_apply!(
-                crd_temp_dir_str,
+                crd_temp_dir.to_str().unwrap(),
                 &self.test_name,
                 "Applying CRDs",
                 fssa = true
@@ -408,6 +477,7 @@ impl TestContext {
 
         test_info!(&self.test_name, "Preparing RBAC manifests");
 
+        let ns = self.test_namespace.clone();
         let sa_src = workspace_root.join("config/rbac/service_account.yaml");
         let sa_content = std::fs::read_to_string(&sa_src)?
             .replace("namespace: system", &format!("namespace: {}", ns));
@@ -422,15 +492,11 @@ impl TestContext {
         std::fs::write(&role_path, role_content)?;
 
         let rb_src = workspace_root.join("config/rbac/role_binding.yaml");
+        let rb = "name: manager-rolebinding";
+        let role = "name: trusted-cluster-operator-role";
         let rb_content = std::fs::read_to_string(&rb_src)?
-            .replace(
-                "name: manager-rolebinding",
-                &format!("name: {}-manager-rolebinding", ns),
-            )
-            .replace(
-                "name: trusted-cluster-operator-role",
-                &format!("name: {}-trusted-cluster-operator-role", ns),
-            )
+            .replace(rb, &format!("name: {}-manager-rolebinding", ns))
+            .replace(role, &format!("name: {}-trusted-cluster-operator-role", ns))
             .replace("namespace: system", &format!("namespace: {}", ns));
         let rb_dst = rbac_temp_dir.join("role_binding.yaml");
         std::fs::write(&rb_dst, rb_content)?;
@@ -468,7 +534,7 @@ impl TestContext {
         std::fs::write(&scc_openshift_rb_dst, scc_openshift_rb_content)?;
 
         kube_apply!(
-            rbac_temp_dir_str,
+            rbac_temp_dir.to_str().unwrap(),
             &self.test_name,
             "Applying RBAC",
             kustomize = true
@@ -476,9 +542,7 @@ impl TestContext {
 
         let manifests_path = Path::new(&self.manifests_dir);
         let operator_manifest_path = manifests_path.join("operator.yaml");
-        let operator_manifest_str = operator_manifest_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid operator manifest path"))?;
+        let operator_manifest_str = operator_manifest_path.to_str().unwrap();
         kube_apply!(
             operator_manifest_str,
             &self.test_name,
@@ -489,9 +553,13 @@ impl TestContext {
             &self.test_name,
             "Updating CR manifest with publicTrusteeAddr"
         );
-        let cluster_url =
-            env::var("CLUSTER_URL").unwrap_or_else(|_| "svc.cluster.local".to_string());
-        let trustee_addr = format!("kbs-service.{}.{}:8080", ns, cluster_url);
+        self.apply_operator_manifest(manifests_path).await
+    }
+
+    async fn apply_operator_manifest(&self, manifests_path: &Path) -> Result<()> {
+        let ns = self.test_namespace.clone();
+        let trustee_addr =
+            get_cluster_url(self.client.clone(), &ns, TRUSTEE_SERVICE, TRUSTEE_PORT).await?;
         let cr_manifest_path = manifests_path.join("trusted_execution_cluster_cr.yaml");
 
         let cr_content = std::fs::read_to_string(&cr_manifest_path)?;
@@ -511,19 +579,14 @@ impl TestContext {
 
         test_info!(
             &self.test_name,
-            "Updated CR manifest with publicTrusteeAddr: {}",
-            trustee_addr
+            "Updated CR manifest with publicTrusteeAddr: {trustee_addr}",
         );
 
-        let cr_manifest_str = cr_manifest_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid CR manifest path"))?;
+        let cr_manifest_str = cr_manifest_path.to_str().unwrap();
         kube_apply!(cr_manifest_str, &self.test_name, "Applying CR manifest");
 
         let approved_image_path = manifests_path.join("approved_image_cr.yaml");
-        let approved_image_str = approved_image_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid ApprovedImage manifest path"))?;
+        let approved_image_str = approved_image_path.to_str().unwrap();
         kube_apply!(
             approved_image_str,
             &self.test_name,
@@ -538,6 +601,13 @@ impl TestContext {
             .await?;
         self.wait_for_deployment_ready(&deployments_api, "trustee-deployment", 180)
             .await?;
+        self.wait_for_deployment_ready(&deployments_api, "attestation-key-register", 120)
+            .await?;
+
+        let platform = get_k8s_platform();
+        for svc in ["kbs-service", "attestation-key-register", "register-server"] {
+            platform.expose(&ns, svc, &self.test_name).await?;
+        }
 
         test_info!(
             &self.test_name,
@@ -545,28 +615,25 @@ impl TestContext {
         );
         let configmap_api: Api<ConfigMap> = Api::namespaced(self.client.clone(), &ns);
 
+        let err = format!("image-pcrs ConfigMap in the namespace {ns} not found");
         let poller = Poller::new()
             .with_timeout(Duration::from_secs(60))
             .with_interval(Duration::from_secs(5))
-            .with_error_message(format!(
-                "image-pcrs ConfigMap in the namespace {} not found",
-                ns
-            ));
+            .with_error_message(err);
 
         let test_name_owned = self.test_name.clone();
-        poller
-            .poll_async(move || {
-                let api = configmap_api.clone();
-                let tn = test_name_owned.clone();
-                async move {
-                    let result = api.get("image-pcrs").await;
-                    if result.is_ok() {
-                        test_info!(&tn, "image-pcrs ConfigMap created");
-                    }
-                    result
+        let check_fn = move || {
+            let api = configmap_api.clone();
+            let tn = test_name_owned.clone();
+            async move {
+                let result = api.get("image-pcrs").await;
+                if result.is_ok() {
+                    test_info!(&tn, "image-pcrs ConfigMap created");
                 }
-            })
-            .await?;
+                result
+            }
+        };
+        poller.poll_async(check_fn).await?;
 
         Ok(())
     }
@@ -601,13 +668,15 @@ macro_rules! setup {
     () => {{ $crate::TestContext::new(TEST_NAME) }};
 }
 
-async fn setup_test_client() -> anyhow::Result<Client> {
+async fn setup_test_client() -> Result<Client> {
     let client = Client::try_default().await?;
     Ok(client)
 }
 
 fn test_namespace_name() -> String {
-    format!("test-{}", &uuid::Uuid::new_v4().to_string()[..8])
+    let namespace_prefix = env::var("TEST_NAMESPACE_PREFIX").unwrap_or_default();
+    let uuid = &uuid::Uuid::new_v4().to_string()[..8];
+    format!("{namespace_prefix}test-{uuid}")
 }
 
 pub async fn wait_for_resource_deleted<K>(
@@ -615,7 +684,7 @@ pub async fn wait_for_resource_deleted<K>(
     resource_name: &str,
     timeout_secs: u64,
     interval_secs: u64,
-) -> anyhow::Result<()>
+) -> Result<()>
 where
     K: kube::Resource<DynamicType = ()> + Clone + std::fmt::Debug,
     K: k8s_openapi::serde::de::DeserializeOwned,

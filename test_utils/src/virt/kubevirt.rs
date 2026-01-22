@@ -19,7 +19,8 @@ pub struct KubevirtBackend(pub VmConfig);
 #[async_trait::async_trait]
 impl VmBackend for KubevirtBackend {
     async fn create_vm(&self) -> Result<()> {
-        let ignition_json = generate_ignition(&self.0, true);
+        ensure_command("virtctl")?;
+        let ignition_json = generate_ignition(&self.0, true).await?;
 
         // Create the secret with the ignition configuration
         let secret_name = format!("{}-ignition-secret", self.0.vm_name);
@@ -171,7 +172,6 @@ impl VmBackend for KubevirtBackend {
     }
 
     async fn ssh_exec(&self, command: &str) -> Result<String> {
-        ensure_command("virtctl")?;
         let full_cmd = format!(
             "virtctl ssh -i {} core@vmi/{}/{} -t '-o IdentitiesOnly=yes' -t '-o StrictHostKeyChecking=no' --known-hosts /dev/null -c '{command}'",
             self.0.ssh_private_key.display(),
