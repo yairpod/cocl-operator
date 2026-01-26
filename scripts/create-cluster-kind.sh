@@ -50,4 +50,8 @@ data:
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 EOF
 
-kubectl create -f  https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml
+# Mirror calico image from quay to avoid to hit the pull rate limit from Docker Hub
+CALICO_FILE=/tmp/calico.yaml
+curl -Lo $CALICO_FILE https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml
+sed -i 's|docker.io/calico|quay.io/calico|g' $CALICO_FILE
+kubectl apply -f $CALICO_FILE
