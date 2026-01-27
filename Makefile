@@ -32,6 +32,8 @@ TRUSTEE_IMAGE ?= quay.io/trusted-execution-clusters/key-broker-service:20260106
 APPROVED_IMAGE ?= quay.io/trusted-execution-clusters/fedora-coreos@sha256:79a0657399e6c67c7c95b8a09193d18e5675b5aa3cfb4d75ea5c8d4d53b2af74
 
 BUILD_TYPE ?= release
+IMAGE_BUILD_OPTION ?=
+IMAGE_BUILD_OPTIONS=--build-arg build_type=$(BUILD_TYPE) $(IMAGE_BUILD_OPTION)
 
 all: build trusted-cluster-gen reg-server attestation-key-register
 
@@ -97,10 +99,10 @@ CONTAINER_CLI ?= podman
 RUNTIME ?= podman
 
 image:
-	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(OPERATOR_IMAGE) -f Containerfile .
-	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(COMPUTE_PCRS_IMAGE) -f compute-pcrs/Containerfile .
-	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(REG_SERVER_IMAGE) -f register-server/Containerfile .
-	$(CONTAINER_CLI) build --build-arg build_type=$(BUILD_TYPE) -t $(ATTESTATION_KEY_REGISTER_IMAGE) -f attestation-key-register/Containerfile .
+	$(CONTAINER_CLI) build $(IMAGE_BUILD_OPTIONS) -t $(OPERATOR_IMAGE) -f Containerfile .
+	$(CONTAINER_CLI) build $(IMAGE_BUILD_OPTIONS) -t $(COMPUTE_PCRS_IMAGE) -f compute-pcrs/Containerfile .
+	$(CONTAINER_CLI) build $(IMAGE_BUILD_OPTIONS) -t $(REG_SERVER_IMAGE) -f register-server/Containerfile .
+	$(CONTAINER_CLI) build $(IMAGE_BUILD_OPTIONS) -t $(ATTESTATION_KEY_REGISTER_IMAGE) -f attestation-key-register/Containerfile .
 
 push: image
 	$(CONTAINER_CLI) push $(OPERATOR_IMAGE) $(PUSH_FLAGS)
