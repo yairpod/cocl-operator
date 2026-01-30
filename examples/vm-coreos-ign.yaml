@@ -5,67 +5,6 @@ metadata:
 spec:
   runStrategy: Always
   template:
-    metadata:
-      annotations:
-        kubevirt.io/ignitiondata: |
-          {
-            "ignition": {
-              "config": {
-                "merge": [
-                  {
-                    "source": "http://register-server.trusted-execution-clusters.svc.cluster.local:8000/ignition-clevis-pin-trustee"
-                  }
-                ]
-              },
-              "version": "3.6.0-experimental"
-            },
-            "passwd": {
-              "users": [
-                {
-                  "name": "core",
-                  "sshAuthorizedKeys": [
-                    "<your-ssh-key>"
-                  ]
-                }
-              ]
-            },
-            "storage": {
-              "files": [
-                {
-                  "path": "/etc/profile.d/systemd-pager.sh",
-                  "contents": {
-                    "compression": "",
-                    "source": "data:,%23%20Tell%20systemd%20to%20not%20use%20a%20pager%20when%20printing%20information%0Aexport%20SYSTEMD_PAGER%3Dcat%0A"
-                  },
-                  "mode": 420
-                }
-              ]
-            },
-            "systemd": {
-              "units": [
-                {
-                  "enabled": false,
-                  "name": "zincati.service"
-                },
-                {
-                  "dropins": [
-                    {
-                      "contents": "[Service]\n# Override Execstart in main unit\nExecStart=\n# Add new Execstart with `-` prefix to ignore failure`\nExecStart=-/usr/sbin/agetty --autologin core --noclear %I $TERM\n",
-                      "name": "autologin-core.conf"
-                    }
-                  ],
-                  "name": "serial-getty@ttyS0.service"
-                }
-              ]
-            },
-            "attestation": {
-              "attestation_key": {
-                "registration": {
-                  "url": "http://attestation-key-register.trusted-execution-clusters.svc.cluster.local:8001/register-ak"
-                }
-              }
-            }
-          }
     spec:
       domain:
         features:
@@ -82,6 +21,9 @@ spec:
           - name: containerdisk
             disk:
               bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
           rng: {}
         resources:
           requests:
@@ -89,5 +31,9 @@ spec:
       volumes:
       - name: containerdisk
         containerDisk:
-          image: "quay.io/trusted-execution-clusters/fedora-coreos-kubevirt:2026-14-01"
+          image: "quay.io/trusted-execution-clusters/fedora-coreos-kubevirt:20260129"
           imagePullPolicy: Always
+      - name: cloudinitdisk
+        cloudInitConfigDrive:
+          secretRef:
+            name: coreos-ignition-secret

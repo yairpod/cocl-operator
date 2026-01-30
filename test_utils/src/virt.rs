@@ -168,10 +168,26 @@ pub async fn create_kubevirt_vm(
     register_server_url: &str,
     image: &str,
 ) -> anyhow::Result<()> {
+    use k8s_openapi::api::core::v1::Secret;
     use kube::Api;
 
     let ignition_config = generate_ignition_config(ssh_public_key, register_server_url, namespace);
     let ignition_json = serde_json::to_string(&ignition_config)?;
+
+    // Create the secret with the ignition configuration
+    let secret_name = format!("{}-ignition-secret", vm_name);
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(secret_name.clone()),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        },
+        string_data: Some(BTreeMap::from([("userdata".to_string(), ignition_json)])),
+        ..Default::default()
+    };
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    secrets.create(&Default::default(), &secret).await?;
 
     let vm = VirtualMachine {
         metadata: ObjectMeta {
@@ -182,10 +198,7 @@ pub async fn create_kubevirt_vm(
         spec: VirtualMachineSpec {
             run_strategy: Some("Always".to_string()),
             template: VirtualMachineTemplate {
-                metadata: Some(BTreeMap::from([(
-                    "annotations".to_string(),
-                    serde_json::json!({"kubevirt.io/ignitiondata": ignition_json}),
-                )])),
+                metadata: None,
                 spec: Some(VirtualMachineTemplateSpec {
                     domain: VirtualMachineTemplateSpecDomain {
                         features: Some(VirtualMachineTemplateSpecDomainFeatures {
@@ -205,14 +218,24 @@ pub async fn create_kubevirt_vm(
                             ..Default::default()
                         }),
                         devices: VirtualMachineTemplateSpecDomainDevices {
-                            disks: Some(vec![VirtualMachineTemplateSpecDomainDevicesDisks {
-                                name: "containerdisk".to_string(),
-                                disk: Some(VirtualMachineTemplateSpecDomainDevicesDisksDisk {
-                                    bus: Some("virtio".to_string()),
+                            disks: Some(vec![
+                                VirtualMachineTemplateSpecDomainDevicesDisks {
+                                    name: "containerdisk".to_string(),
+                                    disk: Some(VirtualMachineTemplateSpecDomainDevicesDisksDisk {
+                                        bus: Some("virtio".to_string()),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
-                                }),
-                                ..Default::default()
-                            }]),
+                                },
+                                VirtualMachineTemplateSpecDomainDevicesDisks {
+                                    name: "cloudinitdisk".to_string(),
+                                    disk: Some(VirtualMachineTemplateSpecDomainDevicesDisksDisk {
+                                        bus: Some("virtio".to_string()),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                            ]),
                             tpm: Some(VirtualMachineTemplateSpecDomainDevicesTpm {
                                 persistent: Some(true),
                                 ..Default::default()
@@ -232,15 +255,27 @@ pub async fn create_kubevirt_vm(
                         }),
                         ..Default::default()
                     },
-                    volumes: Some(vec![VirtualMachineTemplateSpecVolumes {
-                        name: "containerdisk".to_string(),
-                        container_disk: Some(VirtualMachineTemplateSpecVolumesContainerDisk {
-                            image: image.to_string(),
-                            image_pull_policy: Some("Always".to_string()),
+                    volumes: Some(vec![
+                        VirtualMachineTemplateSpecVolumes {
+                            name: "containerdisk".to_string(),
+                            container_disk: Some(VirtualMachineTemplateSpecVolumesContainerDisk {
+                                image: image.to_string(),
+                                image_pull_policy: Some("Always".to_string()),
+                                ..Default::default()
+                            }),
                             ..Default::default()
-                        }),
-                        ..Default::default()
-                    }]),
+                        },
+                        VirtualMachineTemplateSpecVolumes {
+                            name: "cloudinitdisk".to_string(),
+                            cloud_init_config_drive: Some(VirtualMachineTemplateSpecVolumesCloudInitConfigDrive {
+                                secret_ref: Some(VirtualMachineTemplateSpecVolumesCloudInitConfigDriveSecretRef {
+                                    name: Some(secret_name),
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    ]),
                     ..Default::default()
                 }),
             },

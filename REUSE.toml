@@ -16,7 +16,7 @@ path = [
   "lib/src/vendor_kopium/*",
   "must-gather/README.md",
   "tests/README.md",
-  "examples/vm-coreos-ign.yaml",
+  "examples/*",
   "scripts/install-kubevirt.sh"
 ]
 SPDX-FileCopyrightText = [
