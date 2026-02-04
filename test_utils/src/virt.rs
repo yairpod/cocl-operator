@@ -168,6 +168,12 @@ pub async fn create_kubevirt_vm(
     register_server_url: &str,
     image: &str,
 ) -> anyhow::Result<()> {
+    // Fail fast if virtctl is not available
+    if which::which("virtctl").is_err() {
+        return Err(anyhow::anyhow!(
+            "virtctl command not found. Please install virtctl first."
+        ));
+    }
     use k8s_openapi::api::core::v1::Secret;
     use kube::Api;
 
