@@ -76,3 +76,33 @@ pub fn generate_owner_reference<T: Resource<DynamicType = ()>>(
         kind,
     })
 }
+
+/// Get the single TrustedExecutionCluster in the namespace
+///
+/// Returns an error if:
+/// - No TrustedExecutionCluster is found
+/// - More than one TrustedExecutionCluster is found (not supported)
+pub async fn get_trusted_execution_cluster(
+    client: kube::Client,
+) -> anyhow::Result<TrustedExecutionCluster> {
+    use kube::Api;
+
+    let namespace = client.default_namespace().to_string();
+    let clusters: Api<TrustedExecutionCluster> = Api::default_namespaced(client);
+    let params = Default::default();
+    let mut list = clusters.list(&params).await?;
+
+    if list.items.is_empty() {
+        return Err(anyhow::Error::msg(format!(
+            "No TrustedExecutionCluster found in namespace {namespace}. \
+             Ensure that this service is in the same namespace as the TrustedExecutionCluster."
+        )));
+    } else if list.items.len() > 1 {
+        return Err(anyhow::Error::msg(format!(
+            "More than one TrustedExecutionCluster found in namespace {namespace}. \
+             trusted-cluster-operator does not support more than one TrustedExecutionCluster."
+        )));
+    }
+
+    Ok(list.items.pop().unwrap())
+}
