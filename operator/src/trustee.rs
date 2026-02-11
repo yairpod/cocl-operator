@@ -92,6 +92,7 @@ fn recompute_reference_values(image_pcrs: ImagePcrs) -> Vec<ReferenceValue> {
 
 pub async fn update_reference_values(ctx: RvContextData) -> Result<()> {
     let config_maps: Api<ConfigMap> = Api::default_namespaced(ctx.client);
+
     let image_pcrs_map = config_maps.get(PCR_CONFIG_MAP).await?;
     let reference_values = recompute_reference_values(get_image_pcrs(image_pcrs_map)?);
     let rv_json = serde_json::to_string(&reference_values)?;
