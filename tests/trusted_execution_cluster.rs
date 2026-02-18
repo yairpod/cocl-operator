@@ -32,7 +32,6 @@ named_test!(
         // Create a test Machine with TEC as owner reference. We need to set the owner reference
         // manually since the machine is not created directly by the operator.
         let machine_uuid = uuid::Uuid::new_v4().to_string();
-        let machine_ip = "192.168.100.50";
         let machine_name = format!("test-machine-{}", &machine_uuid[..8]);
 
         let machines: Api<Machine> = Api::namespaced(client.clone(), namespace);
@@ -45,7 +44,6 @@ named_test!(
             },
             spec: trusted_cluster_operator_lib::MachineSpec {
                 id: machine_uuid.clone(),
-                registration_address: machine_ip.to_string(),
             },
             status: None,
         };
@@ -53,7 +51,7 @@ named_test!(
         machines.create(&Default::default(), &machine).await?;
         test_ctx.info(format!("Created test Machine: {machine_name}"));
 
-        // Create an AttestationKey with the same IP as the Machine
+        // Create an AttestationKey with the same uuid as the Machine
         let ak_name = format!("test-ak-{}", &machine_uuid[..8]);
         let public_key = "test-public-key-data";
 
@@ -65,8 +63,8 @@ named_test!(
                 ..Default::default()
             },
             spec: trusted_cluster_operator_lib::AttestationKeySpec {
-                address: Some(machine_ip.to_string()),
                 public_key: public_key.to_string(),
+                uuid: Some(machine_uuid.clone()),
             },
             status: None,
         };
@@ -75,7 +73,7 @@ named_test!(
             .create(&Default::default(), &attestation_key)
             .await?;
         test_ctx.info(format!(
-            "Created test AttestationKey: {ak_name} with IP: {machine_ip}",
+            "Created test AttestationKey: {ak_name} with uuid: {machine_uuid}",
         ));
 
         // Wait for the AttestationKey to be approved (operator should match Machine IP and approve it)
@@ -292,7 +290,6 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
     let tec = tec_api.get(tec_name).await?;
     let owner_reference = generate_owner_reference(&tec)?;
 
-    let machine_ip = "1.2.3.4";
     let machine_uuid = uuid::Uuid::new_v4().to_string();
 
     let ak_name = format!("test-ak-{}", &machine_uuid[..8]);
@@ -307,8 +304,8 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
             ..Default::default()
         },
         spec: trusted_cluster_operator_lib::AttestationKeySpec {
-            address: Some(machine_ip.to_string()),
             public_key: random_public_key,
+            uuid: Some(machine_uuid.clone()),
         },
         status: None,
     };
@@ -317,7 +314,7 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
         .create(&Default::default(), &attestation_key)
         .await?;
     test_ctx.info(format!(
-        "Created test AttestationKey: {ak_name} with IP: {machine_ip}",
+        "Created test AttestationKey: {ak_name} with uuid: {machine_uuid}",
     ));
 
     let machine_name = format!("test-machine-{}", &machine_uuid[..8]);
@@ -331,14 +328,13 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
         },
         spec: trusted_cluster_operator_lib::MachineSpec {
             id: machine_uuid.clone(),
-            registration_address: machine_ip.to_string(),
         },
         status: None,
     };
 
     machines.create(&Default::default(), &machine).await?;
     test_ctx.info(format!(
-        "Created test Machine: {machine_name} with IP: {machine_ip}",
+        "Created test Machine: {machine_name} with uuid: {machine_uuid}",
     ));
 
     // Poll for the AttestationKey to be approved, have owner reference, and have a Secret created
