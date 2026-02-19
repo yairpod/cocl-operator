@@ -6,10 +6,9 @@
 pub mod azure;
 pub mod kubevirt;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use clevis_pin_trustee_lib::Key as ClevisKey;
-use k8s_openapi::api::core::v1::Secret;
-use kube::{Api, Client};
+use kube::Client;
 use std::{env, path::PathBuf, time::Duration};
 use tokio::process::Command;
 
@@ -160,20 +159,6 @@ pub async fn ssh_exec(command: &str) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-pub async fn get_root_key(config: &VmConfig, ip: &str) -> Result<Vec<u8>> {
-    let machines: Api<Machine> = Api::namespaced(config.client.clone(), &config.namespace);
-    let list = machines.list(&Default::default()).await?;
-    let retrieval = |m: &&Machine| m.spec.registration_address == ip;
-    let err = format!("No machine found with registration IP {ip}");
-    let machine = list.items.iter().find(retrieval).context(err)?;
-    let machine_name = machine.metadata.name.clone().unwrap();
-    let secret_name = machine_name.strip_prefix("machine-").unwrap();
-
-    let secrets: Api<Secret> = Api::namespaced(config.client.clone(), &config.namespace);
-    let secret = secrets.get(secret_name).await?;
-    Ok(secret.data.unwrap().get("root").unwrap().0.clone())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

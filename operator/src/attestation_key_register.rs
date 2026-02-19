@@ -143,7 +143,7 @@ async fn ak_reconcile(
         ControllerError::Anyhow(e.into())
     })?;
     for machine in &machine_list.items {
-        if ak.spec.address.as_ref() == Some(&machine.spec.registration_address) {
+        if ak.spec.uuid.as_ref() == Some(&machine.spec.id) {
             approve_ak(&ak, machine, client.clone()).await?;
             return Ok(Action::await_change());
         }
@@ -170,13 +170,6 @@ async fn machine_reconcile(
         return Ok(Action::await_change());
     }
 
-    let machine_address = machine.spec.registration_address.clone();
-
-    if machine_address.is_empty() {
-        info!("Machine IP not set, skipping reconciliation");
-        return Ok(Action::await_change());
-    }
-
     let aks: Api<AttestationKey> = Api::default_namespaced(client.clone());
     let lp = ListParams::default();
     let ak_list: ObjectList<AttestationKey> = aks.list(&lp).await.map_err(|e| {
@@ -184,8 +177,8 @@ async fn machine_reconcile(
         ControllerError::Anyhow(e.into())
     })?;
     for ak in ak_list.items {
-        if let Some(ak_address) = &ak.spec.address
-            && *ak_address == machine_address
+        if let Some(ak_uuid) = &ak.spec.uuid
+            && *ak_uuid == machine.spec.id
         {
             approve_ak(&ak, &machine, client.clone()).await?;
             return Ok(Action::await_change());

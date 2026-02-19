@@ -29,20 +29,17 @@ struct Args {
 #[derive(Debug, Deserialize, Serialize)]
 struct AttestationKeyRegistration {
     /// Public attestation key
+    #[serde(alias = "attestation_key")]
     public_key: String,
-    /// Optional address of the machine. If not provided, the request IP will be used.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    address: Option<String>,
 
-    /// Optional platform for the machine corresponding to the attestation key.
+    /// Optional uuid used for the machine registration
     #[serde(skip_serializing_if = "Option::is_none")]
-    platform: Option<String>,
+    uuid: Option<String>,
 }
 
 async fn handle_registration(
     registration: AttestationKeyRegistration,
     client: Client,
-    addr: Option<SocketAddr>,
 ) -> Result<impl warp::Reply, Infallible> {
     info!("Received registration request: {registration:?}");
 
@@ -107,10 +104,6 @@ async fn handle_registration(
         }
     }
 
-    let address = registration
-        .address
-        .or_else(|| addr.map(|socket_addr| socket_addr.ip().to_string()));
-
     let name = format!("ak-{}", Uuid::new_v4());
     let attestation_key = AttestationKey {
         metadata: ObjectMeta {
@@ -120,7 +113,7 @@ async fn handle_registration(
         },
         spec: AttestationKeySpec {
             public_key: registration.public_key,
-            address,
+            uuid: registration.uuid,
         },
         status: None,
     };
@@ -174,12 +167,9 @@ async fn main() -> anyhow::Result<()> {
         .and(warp::path(ATTESTATION_KEY_REGISTER_RESOURCE))
         .and(warp::body::json())
         .and(with_client(client))
-        .and(warp::addr::remote())
         .and_then(handle_registration);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
-    info!("Listening on {addr}");
-
+    let addr: SocketAddr = ([0, 0, 0, 0], args.port).into();
     warp::serve(register).run(addr).await;
 
     Ok(())

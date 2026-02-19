@@ -3,15 +3,13 @@
 //
 // SPDX-License-Identifier: MIT
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use k8s_openapi::{api::core::v1::Secret, apimachinery::pkg::util::intstr::IntOrString};
 use kube::{Api, api::ObjectMeta};
 use std::{collections::BTreeMap, time::Duration};
-use trusted_cluster_operator_lib::{
-    virtualmachineinstances::VirtualMachineInstance, virtualmachines::*,
-};
+use trusted_cluster_operator_lib::virtualmachines::*;
 
-use super::{VmBackend, VmConfig, generate_ignition, get_root_key, ssh_exec};
+use super::{VmBackend, VmConfig, generate_ignition, ssh_exec};
 use crate::{Poller, ensure_command};
 
 pub struct KubevirtBackend(pub VmConfig);
@@ -180,12 +178,25 @@ impl VmBackend for KubevirtBackend {
     }
 
     async fn get_root_key(&self) -> Result<Option<Vec<u8>>> {
-        let vmis: Api<VirtualMachineInstance> =
-            Api::namespaced(self.0.client.clone(), &self.0.namespace);
-        let vmi = vmis.get(&self.0.vm_name).await?;
-        let interfaces = vmi.status.unwrap().interfaces.unwrap();
-        let ip = interfaces.first().unwrap().ip_address.clone().unwrap();
-        get_root_key(&self.0, &ip).await.map(Some)
+        // Extract the UUID from the Clevis token in the LUKS header
+        let uuid_cmd = "sudo cryptsetup token export --token-id 0 /dev/vda4 | jq -r \".jwe.protected\" | base64 -d | jq -r \".clevis.path\" | cut -d/ -f2";
+        let uuid_output = self
+            .ssh_exec(uuid_cmd)
+            .await
+            .context("Failed to extract UUID from VM")?;
+        let uuid = uuid_output.trim();
+
+        if uuid.is_empty() {
+            return Err(anyhow!("Retrieved empty UUID from VM"));
+        }
+
+        // Use the UUID to get the secret (secrets are named with just the UUID)
+        let secrets: Api<Secret> = Api::namespaced(self.0.client.clone(), &self.0.namespace);
+        let secret = secrets
+            .get(uuid)
+            .await
+            .context(format!("Failed to get secret for UUID {uuid}"))?;
+        Ok(Some(secret.data.unwrap().get("root").unwrap().0.clone()))
     }
 
     async fn cleanup(&self) -> Result<()> {
