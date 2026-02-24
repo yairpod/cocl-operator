@@ -202,9 +202,12 @@ test: crds-rs
 test-release: crds-rs
 	cargo test --workspace --bins --release
 
+ENABLE_ATTESTATION_KEY_REGISTRATION ?= true
+
 integration-tests: generate trusted-cluster-gen crds-rs
 	RUST_LOG=info REGISTRY=$(REGISTRY) TAG=$(TAG) \
 		TRUSTEE_IMAGE=$(TRUSTEE_IMAGE) APPROVED_IMAGE=$(APPROVED_IMAGE) TEST_IMAGE=$(TEST_IMAGE) \
+		ENABLE_ATTESTATION_KEY_REGISTRATION=$(ENABLE_ATTESTATION_KEY_REGISTRATION) \
 		cargo test --test trusted_execution_cluster --test attestation \
 		--features virtualization -- --nocapture --test-threads=$(INTEGRATION_TEST_THREADS)
 
