@@ -11,4 +11,4 @@ kubectl create -f "https://github.com/kubevirt/kubevirt/releases/download/${VERS
 kubectl patch kubevirt kubevirt -n kubevirt --type='merge' -p \
 '{"spec":{"configuration":{"developerConfiguration":{"featureGates":["ExperimentalIgnitionSupport"]},"ksmConfiguration":{"nodeLabelSelector":{}}}}}'
 
-kubectl wait --for=jsonpath='{.status.phase}'=Deployed kubevirt/kubevirt -n kubevirt --timeout=10m
+kubectl wait --for=jsonpath='{.status.phase}'=Deployed kubevirt/kubevirt -n kubevirt --timeout=15m
