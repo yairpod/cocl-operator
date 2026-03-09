@@ -94,10 +94,10 @@ Define the container registry, image tag, and CLI.
 
 ```bash
 export REGISTRY=quay.io/<your-username>
-export TAG=0.1.0
+export TAG=0.2.0
 export CONTAINER_CLI=docker # or podman
 ```
-> **Note:** The `TAG` must be a valid semantic version (e.g., `0.1.0`). OLM does not support tags like `latest` for bundle versions.
+> **Note:** The `TAG` must be a valid semantic version (e.g., `0.2.0`). OLM does not support tags like `latest` for bundle versions. Use an unreleased version tag to build with the latest code.
 
 **3. Build, Validate, and Push**
 
@@ -128,15 +128,14 @@ Once the operator is running, you need to create a `TrustedExecutionCluster` cus
 
 First, you must update the example CR with the correct public address for the Trustee service, which must be accessible from your worker nodes or VMs.
 
+> **Note:** The image specifications (`trusteeImage`, `pcrsComputeImage`, `registerServerImage`, `attestationKeyRegisterImage`) are optional. If not specified, the operator will use default images. Only specify them if you need to use custom or specific versions.
+
 ```bash
-# Determine an address reachable by the VMs (for libvirt, usually the bridge IP)
-ip route | grep virbr0
-# Example output:
-# 192.168.122.0/24 dev virbr0 proto kernel scope link src 192.168.122.1
-export TRUSTEE_ADDR=192.168.122.1
+# For KubeVirt VMs running in the cluster, use the service DNS name, for example:
+export TRUSTEE_ADDR=kbs-service.trusted-execution-clusters.svc.cluster.local
 
 # Update the CR with the trustee address (yq is installed via `make build-tools`)
-yq -i '.spec.publicTrusteeAddr = "'$TRUSTEE_ADDR':8080"' \
+yq -i '.spec.publicTrusteeAddr = "'$TRUSTEE_ADDR'" | .spec.registerServerPort = 8000 | .spec.trusteeKbsPort = 8080' \
   config/deploy/trusted_execution_cluster_cr.yaml
 
 # Apply the configured CRs
