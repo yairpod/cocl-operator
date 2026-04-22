@@ -35,14 +35,6 @@ var (
 // +kubebuilder:rbac:groups=trusted-execution-clusters.io,resources=trustedexecutionclusters/status;machines/status;approvedimages/status;attestationkeys/status,verbs=get;patch;update
 
 // TrustedExecutionClusterSpec defines the desired state of TrustedExecutionCluster
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.trusteeImage) || has(self.trusteeImage)", message="Value is required once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.trusteeImage) == has(self.trusteeImage)", message="Value must be set at creation"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.pcrsComputeImage) || has(self.pcrsComputeImage)", message="Value is required once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.pcrsComputeImage) == has(self.pcrsComputeImage)", message="Value must be set at creation"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.registerServerImage) || has(self.registerServerImage)", message="Value is required once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.registerServerImage) == has(self.registerServerImage)", message="Value must be set at creation"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.attestationKeyRegisterImage) || has(self.attestationKeyRegisterImage)", message="Value is required once set"
-// +kubebuilder:validation:XValidation:rule="has(oldSelf.attestationKeyRegisterImage) == has(self.attestationKeyRegisterImage)", message="Value must be set at creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.publicAttestationKeyRegisterAddr) || has(self.publicAttestationKeyRegisterAddr)", message="Value is required once set"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.publicAttestationKeyRegisterAddr) == has(self.publicAttestationKeyRegisterAddr)", message="Value must be set at creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.attestationKeyRegisterSecret) || has(self.attestationKeyRegisterSecret)", message="Value is required once set"
@@ -59,30 +51,6 @@ var (
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.attestationKeyRegisterPort) || has(self.attestationKeyRegisterPort)", message="Value is required once set"
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.attestationKeyRegisterPort) == has(self.attestationKeyRegisterPort)", message="Value must be set at creation"
 type TrustedExecutionClusterSpec struct {
-	// Image reference to Trustee all-in-one image.
-	// If not specified, uses RELATED_IMAGE_TRUSTEE environment variable from operator deployment.
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	TrusteeImage *string `json:"trusteeImage,omitempty"`
-
-	// Image reference to trusted-cluster-operator's compute-pcrs image.
-	// If not specified, uses RELATED_IMAGE_COMPUTE_PCRS environment variable from operator deployment.
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	PcrsComputeImage *string `json:"pcrsComputeImage,omitempty"`
-
-	// Image reference to trusted-cluster-operator's register-server image.
-	// If not specified, uses RELATED_IMAGE_REGISTRATION_SERVER environment variable from operator deployment.
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	RegisterServerImage *string `json:"registerServerImage,omitempty"`
-
-	// Image reference to trusted-cluster-operator's attestation-key-register image.
-	// If not specified, uses RELATED_IMAGE_ATTESTATION_KEY_REGISTER environment variable from operator deployment.
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
-	AttestationKeyRegisterImage *string `json:"attestationKeyRegisterImage,omitempty"`
-
 	// Address where attester can connect to Attestation Key Register
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
