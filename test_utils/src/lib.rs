@@ -321,10 +321,11 @@ pub struct TestContext {
     test_namespace: String,
     manifests_dir: String,
     test_name: String,
+    delayed_approved_image: bool,
 }
 
 impl TestContext {
-    pub async fn new(test_name: &str) -> Result<Self> {
+    pub async fn new(test_name: &str, delayed_approved_image: bool) -> Result<Self> {
         INIT.call_once(|| {
             let _ = env_logger::builder().is_test(true).try_init();
         });
@@ -337,6 +338,7 @@ impl TestContext {
             test_namespace: namespace,
             manifests_dir: String::new(),
             test_name: test_name.to_string(),
+            delayed_approved_image,
         };
 
         let manifests_dir = ctx.create_temp_manifests_dir()?;
@@ -791,10 +793,11 @@ impl TestContext {
             &self.test_name,
             "Updating CR manifest with publicTrusteeAddr"
         );
-        self.apply_operator_manifest(manifests_path).await
+
+        self.apply_cr_manifests(manifests_path).await
     }
 
-    async fn apply_operator_manifest(&self, manifests_path: &Path) -> Result<()> {
+    async fn apply_cr_manifests(&self, manifests_path: &Path) -> Result<()> {
         let ns = &self.test_namespace;
         let trustee_addr =
             get_cluster_url(self.client.clone(), ns, TRUSTEE_SERVICE, Some(TRUSTEE_PORT)).await?;
@@ -844,6 +847,9 @@ impl TestContext {
         let cr_manifest_str = cr_manifest_path.to_str().unwrap();
         kube_apply!(cr_manifest_str, &self.test_name, "Applying CR manifest");
 
+        if self.delayed_approved_image {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
         let approved_image_path = manifests_path.join("approved_image_cr.yaml");
         let approved_image_str = approved_image_path.to_str().unwrap();
         kube_apply!(
@@ -926,7 +932,8 @@ macro_rules! virt_test {
 
 #[macro_export]
 macro_rules! setup {
-    () => {{ $crate::TestContext::new(TEST_NAME) }};
+    () => {{ $crate::TestContext::new(TEST_NAME, false) }};
+    (delayed_approved_image) => {{ $crate::TestContext::new(TEST_NAME, true) }};
 }
 
 async fn setup_test_client() -> Result<Client> {

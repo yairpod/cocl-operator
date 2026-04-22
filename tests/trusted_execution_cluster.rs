@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+// SPDX-FileCopyrightText: Jakob Naucke <jnaucke@redhat.com>
 //
 // SPDX-License-Identifier: MIT
 
@@ -6,6 +7,7 @@ use anyhow::anyhow;
 use compute_pcrs_lib::{Part, Pcr};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use kube::api::ObjectMeta;
 use kube::{Api, api::DeleteParams};
 use std::time::Duration;
 use trusted_cluster_operator_lib::conditions::NOT_COMMITTED_REASON_PENDING;
@@ -472,6 +474,93 @@ async fn test_nonexistent_approved_image() -> anyhow::Result<()> {
             Err(anyhow::anyhow!("ApprovedImage not yet committed"))
         }
     }).await?;
+
+    test_ctx.cleanup().await?;
+    Ok(())
+}
+}
+
+named_test! {
+async fn test_approved_image_readoption() -> anyhow::Result<()> {
+    let test_ctx = setup!(delayed_approved_image).await?;
+    let client = test_ctx.client();
+    let namespace = test_ctx.namespace();
+
+    let clusters: Api<TrustedExecutionCluster> = Api::namespaced(client.clone(), namespace);
+    let images: Api<ApprovedImage> = Api::namespaced(client.clone(), namespace);
+    let configmaps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
+
+    let cluster_spec = clusters.get(TEC_NAME).await?.spec;
+    let image_spec = images.get(APPROVED_IMAGE_NAME).await?.spec;
+
+    test_ctx.info(format!("Deleting TrustedExecuctionCluster {TEC_NAME}"));
+    clusters.delete(TEC_NAME, &Default::default()).await?;
+    let removal_poller = Poller::new()
+        .with_timeout(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(5))
+        .with_error_message(format!(
+            "ConfigMap {TRUSTEE_CONFIG_MAP} or ApprovedImage {APPROVED_IMAGE_NAME} not removed"
+        ));
+    removal_poller
+        .poll_async(|| {
+            let configmaps = configmaps.clone();
+            let images = images.clone();
+            async move {
+                if configmaps.get(TRUSTEE_CONFIG_MAP).await.is_ok() {
+                    return Err(anyhow!("ConfigMap {TRUSTEE_CONFIG_MAP} not yet removed"));
+                }
+                if images.get(APPROVED_IMAGE_NAME).await.is_ok() {
+                    let err = anyhow!("ApprovedImage {APPROVED_IMAGE_NAME} not yet removed");
+                    return Err(err);
+                }
+                Ok(())
+            }
+        })
+        .await?;
+    test_ctx.info(format!("Configmap {TRUSTEE_CONFIG_MAP} was removed"));
+
+    let image = ApprovedImage {
+        spec: image_spec,
+        metadata: ObjectMeta {
+            name: Some(APPROVED_IMAGE_NAME.to_string()),
+            ..Default::default()
+        },
+        status: None,
+    };
+    let cluster = TrustedExecutionCluster {
+        spec: cluster_spec,
+        metadata: ObjectMeta {
+            name: Some(TEC_NAME.to_string()),
+            ..Default::default()
+        },
+        status: None,
+    };
+
+    test_ctx.info("Creating new ApprovedImage and TrustedExecutionCluster");
+    images.create(&Default::default(), &image).await?;
+    // Ensure adoption works even when cluster creation was delayed
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    clusters.create(&Default::default(), &cluster).await?;
+    let regeneration_poller = Poller::new()
+        .with_timeout(Duration::from_secs(180))
+        .with_interval(Duration::from_secs(5))
+        .with_error_message("Reference value not regenerated".to_string());
+    regeneration_poller
+        .poll_async(|| {
+            let configmaps = configmaps.clone();
+            async move {
+                let configmap = configmaps.get(TRUSTEE_CONFIG_MAP).await?;
+                if let Some(data) = &configmap.data
+                    && let Some(json) = data.get(RV_JSON_KEY)
+                    && json.contains(EXPECTED_PCR4)
+                {
+                    return Ok(());
+                }
+                Err(anyhow!("Reference value not yet regenerated"))
+            }
+        })
+        .await?;
+    test_ctx.info("Reference values regenerated");
 
     test_ctx.cleanup().await?;
     Ok(())
