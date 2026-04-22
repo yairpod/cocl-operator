@@ -16,6 +16,7 @@ COPY register-server/src/lib.rs register-server/src/
 # Set only required crates as members to minimize rebuilds upon changes.
 RUN sed -i 's/members =.*/members = ["lib", "register-server"]/' Cargo.toml && \
     sed -i '/\[dev-dependencies\]/,$d' register-server/Cargo.toml && \
+    sed -i '/trusted-cluster-operator-test-utils/d' lib/Cargo.toml && \
     make crds-rs
 
 # In debug builds, build dependencies to avoid full rebuild.

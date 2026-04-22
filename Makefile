@@ -204,10 +204,10 @@ equal-conditions:
 lint: fmt-check clippy vet equal-conditions
 
 test: crds-rs
-	cargo test --workspace --bins
+	cargo test --workspace --bins --lib
 
 test-release: crds-rs
-	cargo test --workspace --bins --release
+	cargo test --workspace --bins --lib --release
 
 integration-tests: generate trusted-cluster-gen crds-rs
 	RUST_LOG=info REGISTRY=$(REGISTRY) TAG=$(TAG) \

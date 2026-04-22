@@ -15,6 +15,7 @@ COPY attestation-key-register/src/lib.rs attestation-key-register/src/
 
 # Set only required crates as members to minimize rebuilds upon changes.
 RUN sed -i 's/members =.*/members = ["lib", "attestation-key-register"]/' Cargo.toml && \
+    sed -i '/trusted-cluster-operator-test-utils/d' lib/Cargo.toml && \
     make crds-rs
 
 # In debug builds, build dependencies to avoid full rebuild.

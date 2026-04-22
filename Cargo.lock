@@ -4253,11 +4253,14 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "compute-pcrs-lib",
+ "http 1.4.1",
  "k8s-openapi",
  "kopium",
  "kube",
  "serde",
  "serde_json",
+ "tokio",
+ "trusted-cluster-operator-test-utils",
 ]
 
 [[package]]

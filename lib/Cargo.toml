@@ -21,3 +21,6 @@ serde_json.workspace = true
 [dev-dependencies]
 # Only a generate dependency, not a Rust dependency. Included here for auto-updates.
 kopium = "0.23.0"
+http.workspace = true
+tokio.workspace = true
+trusted-cluster-operator-test-utils = { path = "../test_utils" }

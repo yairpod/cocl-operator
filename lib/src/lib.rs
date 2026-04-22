@@ -150,3 +150,83 @@ pub async fn get_trusted_execution_cluster(client: Client) -> Result<TrustedExec
     );
     cluster.and_then(|c| c.ok_or(err))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::StatusCode;
+    use kube::api::ObjectList;
+    use trusted_cluster_operator_test_utils::mock_client::*;
+
+    #[tokio::test]
+    async fn test_get_some_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList {
+                items: vec![dummy_cluster()],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let res = get_opt_trusted_execution_cluster(client).await;
+            assert!(res.unwrap().is_some());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_get_none_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList::<TrustedExecutionCluster> {
+                items: vec![],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let res = get_opt_trusted_execution_cluster(client).await;
+            assert!(res.unwrap().is_none());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_non_unique_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList {
+                items: vec![dummy_cluster(), dummy_cluster()],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let err = get_opt_trusted_execution_cluster(client).await.unwrap_err();
+            assert!(err.to_string().contains("More than one"));
+        });
+    }
+
+    #[tokio::test]
+    async fn test_get_opt_trusted_execution_cluster_error() {
+        let clos = async |_, _| Err(StatusCode::INTERNAL_SERVER_ERROR);
+        count_check!(1, clos, |client| {
+            assert!(get_opt_trusted_execution_cluster(client).await.is_err());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_get_no_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList::<TrustedExecutionCluster> {
+                items: vec![],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let err = get_trusted_execution_cluster(client).await.unwrap_err();
+            assert!(err.to_string().contains("No TrustedExecutionCluster found"));
+        });
+    }
+}
