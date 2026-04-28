@@ -67,11 +67,13 @@ Before installing the operator, the manifests of the operator needs to be genera
 make manifests
 ```
 
-The operator needs to be configured with the networking setup where the attestation server will be externally reachable by the machines for the attestation. This can be configured during the installation of the operator by setting the env variable `TRUSTEE_ADDR`.
+The operator needs to be configured with the networking setup where the attestation server and key register will be externally reachable by the machines for the attestation. This can be configured during the installation of the operator by setting the env variable `TRUSTEE_ADDR` and `AK_REGISTRATION_ADDR` respectively.
 
 Example:
 ```console
 export TRUSTEE_ADDR=kbs-service.trusted-execution-clusters.svc.cluster.local
+export AK_REGISTRATION_ADDR=attestation-key-register.trusted-execution-clusters.svc.cluster.local
+
 ```
 This example works with KubeVirt when the KBS is reachable using the pod networking.
 
