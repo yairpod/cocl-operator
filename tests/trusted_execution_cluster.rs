@@ -276,6 +276,7 @@ async fn test_image_disallow() -> anyhow::Result<()> {
         }
     }).await?;
 
+    test_ctx.cleanup().await?;
     Ok(())
 }
 }
