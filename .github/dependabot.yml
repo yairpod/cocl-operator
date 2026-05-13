@@ -24,7 +24,15 @@ updates:
         patterns:
           - "*"
     ignore:
-      - dependency-name: "go"
+      # Block newer versions of k8s until go 1.26 is available in RHEL
+      - dependency-name: "k8s.io/api"
+        versions: [">=0.35"]
+      - dependency-name: "k8s.io/apimachinery"
+        versions: [">=0.35"]
+      - dependency-name: "sigs.k8s.io/controller-runtime"
+        versions: [">=0.23"]
+      - dependency-name: "sigs.k8s.io/controller-tools"
+        versions: [">=0.20"]
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
