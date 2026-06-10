@@ -24,6 +24,12 @@ make install-kubevirt
 make integration-tests
 ```
 
+To run only one test set:
+```bash
+make attestation-tests
+make trusted-execution-cluster-tests
+```
+
 Each test can also be run independently using cargo test. \
 Before running independent tests, run `make trusted-cluster-gen` to create the default boiler-plate yaml manifests for the TEC and make sure `TRUSTEE_IMAGE`, `APPROVED_IMAGE`, `TEST_IMAGE`, `RUST_LOG`, `REGISTRY`, `TAG` env variables are set.
 
