@@ -18,6 +18,7 @@ COPY operator/src/lib.rs operator/src/
 # Set only required crates as members to minimize rebuilds upon changes.
 RUN sed -i 's/members = .*/members = ["lib", "operator"]/' Cargo.toml && \
     sed -i '/\[dev-dependencies\]/,$d' operator/Cargo.toml && \
+    sed -i '/trusted-cluster-operator-test-utils/d' lib/Cargo.toml && \
     make crds-rs
 
 # In debug builds, build dependencies to avoid full rebuild.

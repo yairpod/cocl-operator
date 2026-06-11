@@ -23,7 +23,7 @@ use kube::{
     api::{ObjectMeta, Patch, PatchParams},
 };
 use log::info;
-use operator::{RvContextData, TLS_DIR, create_or_info_if_exists, read_certificate};
+use operator::{TLS_DIR, create_or_info_if_exists, read_certificate};
 use serde::{Serialize, Serializer};
 use serde_json::{Value::String as JsonString, json};
 use std::collections::BTreeMap;
@@ -90,8 +90,8 @@ fn recompute_reference_values(image_pcrs: ImagePcrs) -> Vec<ReferenceValue> {
         .collect()
 }
 
-pub async fn update_reference_values(ctx: RvContextData) -> Result<()> {
-    let config_maps: Api<ConfigMap> = Api::default_namespaced(ctx.client);
+pub async fn update_reference_values(client: Client) -> Result<()> {
+    let config_maps: Api<ConfigMap> = Api::default_namespaced(client);
 
     let image_pcrs_map = config_maps.get(PCR_CONFIG_MAP).await?;
     let reference_values = recompute_reference_values(get_image_pcrs(image_pcrs_map)?);
@@ -582,6 +582,7 @@ mod tests {
     use http::{Method, Request, StatusCode};
     use kube::client::Body;
     use trusted_cluster_operator_test_utils::mock_client::*;
+    use trusted_cluster_operator_test_utils::test_error_method;
 
     #[test]
     fn test_get_image_pcrs_success() {
@@ -642,8 +643,7 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
         };
         count_check!(3, clos, |client| {
-            let ctx = generate_rv_ctx(client);
-            assert!(update_reference_values(ctx).await.is_ok());
+            assert!(update_reference_values(client).await.is_ok());
         });
     }
 
@@ -654,8 +654,7 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}"),
         };
         count_check!(1, clos, |client| {
-            let ctx = generate_rv_ctx(client);
-            assert!(update_reference_values(ctx).await.is_err());
+            assert!(update_reference_values(client).await.is_err());
         });
     }
 
@@ -669,8 +668,7 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
         };
         count_check!(2, clos, |client| {
-            let ctx = generate_rv_ctx(client);
-            assert!(update_reference_values(ctx).await.is_err())
+            assert!(update_reference_values(client).await.is_err())
         });
     }
 
@@ -686,8 +684,7 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
         };
         count_check!(2, clos, |client| {
-            let ctx = generate_rv_ctx(client);
-            let err = update_reference_values(ctx).await.err().unwrap();
+            let err = update_reference_values(client).await.err().unwrap();
             assert!(err.to_string().contains("but had no data"));
         });
     }
@@ -824,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_att_policy_error() {
         let clos = |client| generate_attestation_policy(client, Default::default());
-        test_create_error(clos).await;
+        test_error_method!(clos, Method::POST);
     }
 
     #[tokio::test]
@@ -842,7 +839,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_secret_error() {
         let clos = |client| generate_secret(client, "id", Default::default());
-        test_create_error(clos).await;
+        test_error_method!(clos, Method::POST);
     }
 
     #[tokio::test]
@@ -860,7 +857,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_trustee_data_error() {
         let clos = |client| generate_trustee_data(client, Default::default(), &None);
-        test_create_error(clos).await;
+        test_error_method!(clos, Method::POST);
     }
 
     #[tokio::test]
@@ -872,7 +869,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_kbs_service_error() {
         let clos = |client| generate_kbs_service(client, Default::default(), Some(80));
-        test_create_error(clos).await;
+        test_error_method!(clos, Method::POST);
     }
 
     #[tokio::test]
@@ -884,6 +881,6 @@ mod tests {
     #[tokio::test]
     async fn test_generate_kbs_depl_error() {
         let clos = |client| generate_kbs_deployment(client, Default::default(), "image", &None);
-        test_create_error(clos).await;
+        test_error_method!(clos, Method::POST);
     }
 }

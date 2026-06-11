@@ -14,6 +14,8 @@ use std::{convert::Infallible, sync::Arc};
 use tower::service_fn;
 use trusted_cluster_operator_lib::{TrustedExecutionCluster, TrustedExecutionClusterSpec};
 
+pub const TEST_UID: &str = "test-uid";
+
 #[macro_export]
 macro_rules! assert_kube_api_error {
     ($err:expr, $code:expr, $reason:expr, $message:expr, $status:expr) => {{
@@ -40,6 +42,17 @@ macro_rules! count_check {
         $body
         assert_eq!(count.load(std::sync::atomic::Ordering::Acquire), $expected, "Endpoint call count mismatch");
     }
+}
+
+#[macro_export]
+macro_rules! test_error_method {
+    ($action:ident, $method:path) => {
+        let clos = async |req: Request<_>, _| match req.method() {
+            &$method => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            _ => panic!("unexpected API interaction: {req:?}"),
+        };
+        test_error($action, clos).await;
+    };
 }
 
 pub use count_check;
@@ -144,7 +157,7 @@ pub async fn test_create_already_exists<
     });
 }
 
-async fn test_error<
+pub async fn test_error<
     F: Fn(Client) -> S,
     S: Future<Output = anyhow::Result<T>>,
     T: Debug,
@@ -161,43 +174,21 @@ async fn test_error<
     });
 }
 
-pub async fn test_create_error<F: Fn(Client) -> S, S: Future<Output = anyhow::Result<()>>>(
-    create: F,
-) {
-    let clos = async |req: Request<_>, _| match req.method() {
-        &Method::POST => Err(StatusCode::INTERNAL_SERVER_ERROR),
-        _ => panic!("unexpected API interaction: {req:?}"),
-    };
-    test_error(create, clos).await;
-}
-
-pub async fn test_get_error<F: Fn(Client) -> S, S: Future<Output = anyhow::Result<()>>>(get: F) {
-    let clos = async |req: Request<_>, _| match req.method() {
-        &Method::GET => Err(StatusCode::INTERNAL_SERVER_ERROR),
-        _ => panic!("unexpected API interaction: {req:?}"),
-    };
-    test_error(get, clos).await;
-}
-
 pub fn dummy_cluster() -> TrustedExecutionCluster {
     TrustedExecutionCluster {
         metadata: ObjectMeta {
             name: Some("test".to_string()),
-            uid: Some("uid".to_string()),
+            uid: Some(TEST_UID.to_string()),
             ..Default::default()
         },
         status: None,
         spec: TrustedExecutionClusterSpec {
-            trustee_image: Some("".to_string()),
-            pcrs_compute_image: Some("".to_string()),
-            register_server_image: Some("".to_string()),
             public_trustee_addr: Some("::".to_string()),
             register_server_secret: None,
             trustee_secret: None,
             attestation_key_register_secret: None,
             register_server_port: None,
             trustee_kbs_port: None,
-            attestation_key_register_image: Some("".to_string()),
             attestation_key_register_port: None,
             public_attestation_key_register_addr: Some("::".to_string()),
         },

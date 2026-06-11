@@ -25,10 +25,10 @@ pub use kopium::issuers;
 pub use vendor_kopium::virtualmachineinstances;
 pub use vendor_kopium::virtualmachines;
 
-use anyhow::Context;
+use anyhow::{Context, Result, anyhow};
 use conditions::*;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference, Time};
-use kube::Resource;
+use kube::{Api, Client, Resource};
 
 #[macro_export]
 macro_rules! update_status {
@@ -111,7 +111,7 @@ pub fn committed_condition(
 /// Generate an OwnerReference for any Kubernetes resource
 pub fn generate_owner_reference<T: Resource<DynamicType = ()>>(
     object: &T,
-) -> anyhow::Result<OwnerReference> {
+) -> Result<OwnerReference> {
     let name = object.meta().name.clone();
     let uid = object.meta().uid.clone();
     let kind = T::kind(&()).to_string();
@@ -125,32 +125,108 @@ pub fn generate_owner_reference<T: Resource<DynamicType = ()>>(
     })
 }
 
-/// Get the single TrustedExecutionCluster in the namespace
-///
-/// Returns an error if:
-/// - No TrustedExecutionCluster is found
-/// - More than one TrustedExecutionCluster is found (not supported)
-pub async fn get_trusted_execution_cluster(
-    client: kube::Client,
-) -> anyhow::Result<TrustedExecutionCluster> {
-    use kube::Api;
-
+pub async fn get_opt_trusted_execution_cluster(
+    client: Client,
+) -> Result<Option<TrustedExecutionCluster>> {
     let namespace = client.default_namespace().to_string();
     let clusters: Api<TrustedExecutionCluster> = Api::default_namespaced(client);
-    let params = Default::default();
-    let mut list = clusters.list(&params).await?;
-
-    if list.items.is_empty() {
-        return Err(anyhow::Error::msg(format!(
-            "No TrustedExecutionCluster found in namespace {namespace}. \
-             Ensure that this service is in the same namespace as the TrustedExecutionCluster."
-        )));
-    } else if list.items.len() > 1 {
-        return Err(anyhow::Error::msg(format!(
+    let list = clusters.list(&Default::default()).await?;
+    if list.items.len() > 1 {
+        return Err(anyhow!(
             "More than one TrustedExecutionCluster found in namespace {namespace}. \
              trusted-cluster-operator does not support more than one TrustedExecutionCluster."
-        )));
+        ));
+    }
+    Ok(list.items.into_iter().next())
+}
+
+/// Get the single TrustedExecutionCluster in the namespace
+pub async fn get_trusted_execution_cluster(client: Client) -> Result<TrustedExecutionCluster> {
+    let namespace = client.default_namespace().to_string();
+    let cluster = get_opt_trusted_execution_cluster(client).await;
+    let err = anyhow!(
+        "No TrustedExecutionCluster found in namespace {namespace}. \
+         Ensure that this service is in the same namespace as the TrustedExecutionCluster."
+    );
+    cluster.and_then(|c| c.ok_or(err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::StatusCode;
+    use kube::api::ObjectList;
+    use trusted_cluster_operator_test_utils::mock_client::*;
+
+    #[tokio::test]
+    async fn test_get_some_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList {
+                items: vec![dummy_cluster()],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let res = get_opt_trusted_execution_cluster(client).await;
+            assert!(res.unwrap().is_some());
+        });
     }
 
-    Ok(list.items.pop().unwrap())
+    #[tokio::test]
+    async fn test_get_none_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList::<TrustedExecutionCluster> {
+                items: vec![],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let res = get_opt_trusted_execution_cluster(client).await;
+            assert!(res.unwrap().is_none());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_non_unique_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList {
+                items: vec![dummy_cluster(), dummy_cluster()],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let err = get_opt_trusted_execution_cluster(client).await.unwrap_err();
+            assert!(err.to_string().contains("More than one"));
+        });
+    }
+
+    #[tokio::test]
+    async fn test_get_opt_trusted_execution_cluster_error() {
+        let clos = async |_, _| Err(StatusCode::INTERNAL_SERVER_ERROR);
+        count_check!(1, clos, |client| {
+            assert!(get_opt_trusted_execution_cluster(client).await.is_err());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_get_no_trusted_execution_cluster() {
+        let clos = async |_, _| {
+            let object_list = ObjectList::<TrustedExecutionCluster> {
+                items: vec![],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&object_list).unwrap())
+        };
+        count_check!(1, clos, |client| {
+            let err = get_trusted_execution_cluster(client).await.unwrap_err();
+            assert!(err.to_string().contains("No TrustedExecutionCluster found"));
+        });
+    }
 }

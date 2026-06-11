@@ -16,6 +16,7 @@ COPY compute-pcrs/src/lib.rs compute-pcrs/src/
 
 # Set only required crates as members to minimize rebuilds upon changes.
 RUN sed -i 's/members =.*/members = ["compute-pcrs", "lib"]/' Cargo.toml && \
+    sed -i '/trusted-cluster-operator-test-utils/d' lib/Cargo.toml && \
     git clone --depth 1 https://github.com/trusted-execution-clusters/reference-values && \
     make crds-rs
 

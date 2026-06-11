@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+// SPDX-FileCopyrightText: Jakob Naucke <jnaucke@redhat.com>
 //
 // SPDX-License-Identifier: MIT
 
+use anyhow::anyhow;
 use compute_pcrs_lib::{Part, Pcr};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use kube::api::ObjectMeta;
 use kube::{Api, api::DeleteParams};
 use std::time::Duration;
 use trusted_cluster_operator_lib::conditions::NOT_COMMITTED_REASON_PENDING;
@@ -15,18 +18,19 @@ use trusted_cluster_operator_lib::{
 use trusted_cluster_operator_test_utils::*;
 
 const EXPECTED_PCR4: &str = "ff2b357be4a4bc66be796d4e7b2f1f27077dc89b96220aae60b443bcf4672525";
+const TEC_NAME: &str = "trusted-execution-cluster";
+const APPROVED_IMAGE_NAME: &str = "coreos";
+const TRUSTEE_CONFIG_MAP: &str = "trustee-data";
+const RV_JSON_KEY: &str = "reference-values.json";
 
 named_test!(
     async fn test_trusted_execution_cluster_uninstall() -> anyhow::Result<()> {
         let test_ctx = setup!().await?;
         let client = test_ctx.client();
         let namespace = test_ctx.namespace();
-        let name = "trusted-execution-cluster";
-
-        let configmap_api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
 
         let tec_api: Api<TrustedExecutionCluster> = Api::namespaced(client.clone(), namespace);
-        let tec = tec_api.get(name).await?;
+        let tec = tec_api.get(TEC_NAME).await?;
 
         let owner_reference = generate_owner_reference(&tec)?;
 
@@ -103,7 +107,7 @@ named_test!(
                         .unwrap_or(false);
 
                     if !has_approved_condition {
-                        return Err(anyhow::anyhow!(
+                        return Err(anyhow!(
                             "AttestationKey does not have Approved condition yet"
                         ));
                     }
@@ -118,18 +122,17 @@ named_test!(
         // Delete the cluster cr
         let api: Api<TrustedExecutionCluster> = Api::namespaced(client.clone(), namespace);
         let dp = DeleteParams::default();
-        api.delete(name, &dp).await?;
+        api.delete(TEC_NAME, &dp).await?;
 
         // Wait until it disappears
-        wait_for_resource_deleted(&api, name, 120, 5).await?;
+        wait_for_resource_deleted(&api, TEC_NAME, 120, 5).await?;
 
         let deployments_api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
         wait_for_resource_deleted(&deployments_api, "trustee-deployment", 120, 1).await?;
         wait_for_resource_deleted(&deployments_api, "register-server", 120, 1).await?;
-        wait_for_resource_deleted(&configmap_api, "image-pcrs", 120, 1).await?;
 
         let images_api: Api<ApprovedImage> = Api::namespaced(client.clone(), namespace);
-        wait_for_resource_deleted(&images_api, "coreos", 120, 1).await?;
+        wait_for_resource_deleted(&images_api, APPROVED_IMAGE_NAME, 120, 1).await?;
 
         wait_for_resource_deleted(&machines, &machine_name, 120, 1).await?;
         wait_for_resource_deleted(&attestation_keys, &ak_name, 120, 1).await?;
@@ -169,7 +172,7 @@ async fn test_image_pcrs_configmap_updates() -> anyhow::Result<()> {
                     return Ok(());
                 }
 
-                Err(anyhow::anyhow!("image-pcrs ConfigMap not yet populated with image-pcrs.json data"))
+                Err(anyhow!("image-pcrs ConfigMap not yet populated with image-pcrs.json data"))
             }
         })
         .await?;
@@ -255,7 +258,7 @@ async fn test_image_disallow() -> anyhow::Result<()> {
     let namespace = test_ctx.namespace();
 
     let images: Api<ApprovedImage> = Api::namespaced(client.clone(), namespace);
-    images.delete("coreos", &DeleteParams::default()).await?;
+    images.delete(APPROVED_IMAGE_NAME, &DeleteParams::default()).await?;
 
     let configmap_api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
     let poller = Poller::new()
@@ -265,14 +268,14 @@ async fn test_image_disallow() -> anyhow::Result<()> {
     poller.poll_async(|| {
         let api = configmap_api.clone();
         async move {
-            let cm = api.get("trustee-data").await?;
+            let cm = api.get(TRUSTEE_CONFIG_MAP).await?;
             if let Some(data) = &cm.data
-                && let Some(reference_values_json) = data.get("reference-values.json")
+                && let Some(reference_values_json) = data.get(RV_JSON_KEY)
                 && !reference_values_json.contains(EXPECTED_PCR4)
             {
                 return Ok(());
             }
-            Err(anyhow::anyhow!("Reference value not yet removed"))
+            Err(anyhow!("Reference value not yet removed"))
         }
     }).await?;
 
@@ -286,10 +289,9 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
     let test_ctx = setup!().await?;
     let client = test_ctx.client();
     let namespace = test_ctx.namespace();
-    let tec_name = "trusted-execution-cluster";
 
     let tec_api: Api<TrustedExecutionCluster> = Api::namespaced(client.clone(), namespace);
-    let tec = tec_api.get(tec_name).await?;
+    let tec = tec_api.get(TEC_NAME).await?;
     let owner_reference = generate_owner_reference(&tec)?;
 
     let machine_uuid = uuid::Uuid::new_v4().to_string();
@@ -368,7 +370,7 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
                     .unwrap_or(false);
 
                 if !has_approved_condition {
-                    return Err(anyhow::anyhow!(
+                    return Err(anyhow!(
                         "AttestationKey does not have Approved condition yet"
                     ));
                 }
@@ -386,7 +388,7 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
                     .unwrap_or(false);
 
                 if !has_machine_owner_ref {
-                    return Err(anyhow::anyhow!(
+                    return Err(anyhow!(
                         "AttestationKey does not have owner reference to Machine yet"
                     ));
                 }
@@ -405,7 +407,7 @@ async fn test_attestation_key_lifecycle() -> anyhow::Result<()> {
                     .unwrap_or(false);
 
                 if !has_ak_owner_ref {
-                    return Err(anyhow::anyhow!(
+                    return Err(anyhow!(
                         "Secret does not have owner reference to AttestationKey yet"
                     ));
                 }
@@ -472,6 +474,93 @@ async fn test_nonexistent_approved_image() -> anyhow::Result<()> {
             Err(anyhow::anyhow!("ApprovedImage not yet committed"))
         }
     }).await?;
+
+    test_ctx.cleanup().await?;
+    Ok(())
+}
+}
+
+named_test! {
+async fn test_approved_image_readoption() -> anyhow::Result<()> {
+    let test_ctx = setup!(delayed_approved_image).await?;
+    let client = test_ctx.client();
+    let namespace = test_ctx.namespace();
+
+    let clusters: Api<TrustedExecutionCluster> = Api::namespaced(client.clone(), namespace);
+    let images: Api<ApprovedImage> = Api::namespaced(client.clone(), namespace);
+    let configmaps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
+
+    let cluster_spec = clusters.get(TEC_NAME).await?.spec;
+    let image_spec = images.get(APPROVED_IMAGE_NAME).await?.spec;
+
+    test_ctx.info(format!("Deleting TrustedExecuctionCluster {TEC_NAME}"));
+    clusters.delete(TEC_NAME, &Default::default()).await?;
+    let removal_poller = Poller::new()
+        .with_timeout(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(5))
+        .with_error_message(format!(
+            "ConfigMap {TRUSTEE_CONFIG_MAP} or ApprovedImage {APPROVED_IMAGE_NAME} not removed"
+        ));
+    removal_poller
+        .poll_async(|| {
+            let configmaps = configmaps.clone();
+            let images = images.clone();
+            async move {
+                if configmaps.get(TRUSTEE_CONFIG_MAP).await.is_ok() {
+                    return Err(anyhow!("ConfigMap {TRUSTEE_CONFIG_MAP} not yet removed"));
+                }
+                if images.get(APPROVED_IMAGE_NAME).await.is_ok() {
+                    let err = anyhow!("ApprovedImage {APPROVED_IMAGE_NAME} not yet removed");
+                    return Err(err);
+                }
+                Ok(())
+            }
+        })
+        .await?;
+    test_ctx.info(format!("Configmap {TRUSTEE_CONFIG_MAP} was removed"));
+
+    let image = ApprovedImage {
+        spec: image_spec,
+        metadata: ObjectMeta {
+            name: Some(APPROVED_IMAGE_NAME.to_string()),
+            ..Default::default()
+        },
+        status: None,
+    };
+    let cluster = TrustedExecutionCluster {
+        spec: cluster_spec,
+        metadata: ObjectMeta {
+            name: Some(TEC_NAME.to_string()),
+            ..Default::default()
+        },
+        status: None,
+    };
+
+    test_ctx.info("Creating new ApprovedImage and TrustedExecutionCluster");
+    images.create(&Default::default(), &image).await?;
+    // Ensure adoption works even when cluster creation was delayed
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    clusters.create(&Default::default(), &cluster).await?;
+    let regeneration_poller = Poller::new()
+        .with_timeout(Duration::from_secs(180))
+        .with_interval(Duration::from_secs(5))
+        .with_error_message("Reference value not regenerated".to_string());
+    regeneration_poller
+        .poll_async(|| {
+            let configmaps = configmaps.clone();
+            async move {
+                let configmap = configmaps.get(TRUSTEE_CONFIG_MAP).await?;
+                if let Some(data) = &configmap.data
+                    && let Some(json) = data.get(RV_JSON_KEY)
+                    && json.contains(EXPECTED_PCR4)
+                {
+                    return Ok(());
+                }
+                Err(anyhow!("Reference value not yet regenerated"))
+            }
+        })
+        .await?;
+    test_ctx.info("Reference values regenerated");
 
     test_ctx.cleanup().await?;
     Ok(())

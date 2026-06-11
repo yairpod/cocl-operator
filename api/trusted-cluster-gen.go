@@ -92,6 +92,24 @@ func generateOperator(args *Args) error {
 					Name:    name,
 					Image:   args.image,
 					Command: []string{"/usr/bin/operator"},
+					Env: []corev1.EnvVar{
+						{
+							Name:  "RELATED_IMAGE_TRUSTEE",
+							Value: args.trusteeImage,
+						},
+						{
+							Name:  "RELATED_IMAGE_COMPUTE_PCRS",
+							Value: args.pcrsComputeImage,
+						},
+						{
+							Name:  "RELATED_IMAGE_REGISTRATION_SERVER",
+							Value: args.registerServerImage,
+						},
+						{
+							Name:  "RELATED_IMAGE_ATTESTATION_KEY_REGISTER",
+							Value: args.attestationKeyRegisterImage,
+						},
+					},
 				},
 			},
 		},
@@ -140,10 +158,6 @@ func generateTrustedExecutionClusterCR(args *Args) error {
 			Namespace: args.namespace,
 		},
 		Spec: v1alpha1.TrustedExecutionClusterSpec{
-			TrusteeImage:                     &args.trusteeImage,
-			PcrsComputeImage:                 &args.pcrsComputeImage,
-			RegisterServerImage:              &args.registerServerImage,
-			AttestationKeyRegisterImage:      &args.attestationKeyRegisterImage,
 			PublicAttestationKeyRegisterAddr: nil,
 			PublicTrusteeAddr:                nil,
 			TrusteeSecret:                    nil,
