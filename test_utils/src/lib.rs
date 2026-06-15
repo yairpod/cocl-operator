@@ -17,6 +17,7 @@ use trusted_cluster_operator_lib::certificates::{
 };
 use trusted_cluster_operator_lib::issuers::{Issuer, IssuerCa, IssuerSpec};
 
+use trusted_cluster_operator_lib::Machine;
 use trusted_cluster_operator_lib::TrustedExecutionCluster;
 use trusted_cluster_operator_lib::openshift_ingresses::Ingress;
 use trusted_cluster_operator_lib::routes::Route;
@@ -404,6 +405,7 @@ impl TestContext {
 
     pub async fn cleanup(&self) -> Result<()> {
         self.delete_trusted_execution_cluster().await?;
+        self.delete_machines().await?;
         self.cleanup_namespace().await?;
         self.cleanup_manifests_dir()?;
         Ok(())
@@ -454,6 +456,25 @@ impl TestContext {
                     "TrustedExecutionCluster {} has been deleted",
                     name
                 );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn delete_machines(&self) -> Result<()> {
+        let machine_api: Api<Machine> = Api::namespaced(self.client.clone(), &self.test_namespace);
+        let machine_list = machine_api.list(&Default::default()).await?;
+
+        for machine in &machine_list.items {
+            if let Some(name) = &machine.metadata.name {
+                test_info!(
+                    &self.test_name,
+                    "Waiting for Machine {} to be deleted",
+                    name
+                );
+                wait_for_resource_deleted(&machine_api, name, 120, 5).await?;
+                test_info!(&self.test_name, "Machine {} has been deleted", name);
             }
         }
 
