@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
 use k8s_openapi::ByteString;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::core::v1::ObjectReference;
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, PodSpec, PodTemplateSpec, Secret, Service, ServicePort, ServiceSpec,
 };
@@ -19,6 +20,7 @@ use kube::{
     runtime::{
         Controller,
         controller::Action,
+        events::{Event as K8sEvent, EventType, Recorder},
         finalizer,
         finalizer::Event,
         reflector::{self, ObjectRef, Store},
@@ -36,12 +38,13 @@ use trusted_cluster_operator_lib::{AttestationKey, AttestationKeyStatus, Machine
 use crate::conditions::attestation_key_approved_condition;
 use crate::trustee;
 use operator::{ControllerError, LONG_REQUEUE, TLS_DIR, controller_error_policy};
-use operator::{create_or_info_if_exists, read_certificate, upsert_condition};
+use operator::{create_or_info_if_exists, publish_event, read_certificate, upsert_condition};
 
 /// Shared context for the three attestation-key controllers.
 /// Stores give local cache access to avoid repeated API-server reads.
 pub struct AkContextData {
     pub client: Client,
+    pub recorder: Option<Recorder>,
     pub machine_store: Store<Machine>,
     pub ak_store: Store<AttestationKey>,
     pub secret_store: Store<Secret>,
@@ -60,8 +63,10 @@ impl AkContextData {
         crate::spawn_reflector::<Secret>(secret_writer, client.clone(), "Secret");
         crate::spawn_reflector::<Deployment>(deployment_writer, client.clone(), "Deployment");
 
+        let recorder = Some(operator::new_recorder(client.clone(), "ak-controller"));
         Self {
             client,
+            recorder,
             machine_store,
             ak_store,
             secret_store,
@@ -238,14 +243,36 @@ async fn approve_ak(ak: &AttestationKey, machine: &Machine, ctx: &AkContextData)
     let condition = attestation_key_approved_condition(approve_reason, generation, &ak.status);
     let mut conditions = ak.status.as_ref().and_then(|s| s.conditions.clone());
     let changed = upsert_condition(&mut conditions, condition);
+    let machine_name = machine.metadata.name.clone().unwrap_or_default();
 
     if changed {
         let status = AttestationKeyStatus { conditions };
         update_status!(aks, &name, status)?;
         info!("Approved attestation key {name}");
-    }
 
-    let machine_name = machine.metadata.name.clone().unwrap_or_default();
+        let ak_ref: ObjectReference = ak.object_ref(&());
+        let machine_ref: ObjectReference = machine.object_ref(&());
+        let ev = K8sEvent {
+            type_: EventType::Normal,
+            reason: "AttestationKeyApproved".into(),
+            note: Some(format!(
+                "Attestation key {name} approved for machine {machine_name}"
+            )),
+            action: "Approving".into(),
+            secondary: Some(machine_ref.clone()),
+        };
+        publish_event(&ctx.recorder, &ev, &ak_ref).await;
+        let ev = K8sEvent {
+            type_: EventType::Normal,
+            reason: "AttestationKeyApproved".into(),
+            note: Some(format!(
+                "Machine {machine_name} matched attestation key {name}"
+            )),
+            action: "Approving".into(),
+            secondary: Some(ak_ref),
+        };
+        publish_event(&ctx.recorder, &ev, &machine_ref).await;
+    }
     let has_machine_owner = ak
         .metadata
         .owner_references

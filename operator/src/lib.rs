@@ -10,10 +10,13 @@
 
 use anyhow::Result;
 use futures_util::StreamExt;
-use k8s_openapi::api::core::v1::{Secret, SecretVolumeSource, Volume, VolumeMount};
+use k8s_openapi::api::core::v1::{
+    ObjectReference, Secret, SecretVolumeSource, Volume, VolumeMount,
+};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use k8s_openapi::jiff::Timestamp;
 use kube::Resource;
+use kube::runtime::events::{Event, Recorder, Reporter};
 use kube::runtime::reflector::{self, Store};
 use kube::runtime::watcher::watcher;
 use kube::{Api, Client, runtime::controller::Action};
@@ -40,6 +43,22 @@ pub async fn controller_info<T: Debug, E: Debug>(res: Result<T, E>) {
     match res {
         Ok(o) => info!("reconciled {o:?}"),
         Err(e) => info!("reconcile failed: {e:?}"),
+    }
+}
+
+pub fn new_recorder(client: Client, controller_name: &str) -> Recorder {
+    let reporter = Reporter {
+        controller: controller_name.into(),
+        instance: std::env::var("CONTROLLER_POD_NAME").ok(),
+    };
+    Recorder::new(client, reporter)
+}
+
+pub async fn publish_event(recorder: &Option<Recorder>, ev: &Event, reference: &ObjectReference) {
+    if let Some(recorder) = recorder {
+        if let Err(e) = recorder.publish(ev, reference).await {
+            warn!("Failed to publish event: {e}");
+        }
     }
 }
 

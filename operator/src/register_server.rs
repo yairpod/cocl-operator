@@ -6,6 +6,7 @@
 use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::core::v1::ObjectReference;
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, PodSpec, PodTemplateSpec, Service, ServicePort, ServiceSpec,
 };
@@ -15,6 +16,7 @@ use k8s_openapi::apimachinery::pkg::{
 };
 use kube::runtime::{
     controller::{Action, Controller},
+    events::{Event as K8sEvent, EventType, Recorder},
     finalizer,
     finalizer::Event,
 };
@@ -25,6 +27,11 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::trustee;
 use operator::*;
 use trusted_cluster_operator_lib::{Machine, TrustedExecutionCluster, endpoints::*};
+
+struct KeygenContext {
+    client: Client,
+    recorder: Option<Recorder>,
+}
 
 /// Finalizer name to discard decryption keys when a machine is deleted
 const MACHINE_FINALIZER: &str = "finalizer.machine.trusted-execution-clusters.io";
@@ -127,26 +134,59 @@ pub async fn create_register_server_service(
 
 async fn keygen_reconcile(
     machine: Arc<Machine>,
-    client: Arc<Client>,
+    ctx: Arc<KeygenContext>,
 ) -> Result<Action, ControllerError> {
-    let kube_client_clone = Arc::unwrap_or_clone(client.clone());
+    let kube_client_clone = ctx.client.clone();
     let machines: Api<Machine> = Api::default_namespaced(kube_client_clone.clone());
+    let recorder = ctx.recorder.clone();
     finalizer(&machines, MACHINE_FINALIZER, machine, |ev| async move {
         match ev {
             Event::Apply(machine) => {
-                let kube_client = Arc::unwrap_or_clone(client);
+                let machine_ref: ObjectReference = machine.object_ref(&());
+                let kube_client = ctx.client.clone();
                 let id = &machine.spec.id.clone();
-                async {
+                let result = async {
                     let owner_reference = generate_owner_reference(&Arc::unwrap_or_clone(machine))?;
                     trustee::generate_secret(kube_client.clone(), id, owner_reference).await?;
                     trustee::mount_secret(kube_client, id).await
                 }
-                .await
-                .map(|_| LONG_REQUEUE)
-                .map_err(|e| finalizer::Error::<ControllerError>::ApplyFailed(e.into()))
+                .await;
+                if result.is_ok() {
+                    publish_event(
+                        &recorder,
+                        &K8sEvent {
+                            type_: EventType::Normal,
+                            reason: "KeyProvisioned".into(),
+                            note: Some(format!("Decryption key provisioned for machine {id}")),
+                            action: "Provisioning".into(),
+                            secondary: None,
+                        },
+                        &machine_ref,
+                    )
+                    .await;
+                } else {
+                    publish_event(
+                        &recorder,
+                        &K8sEvent {
+                            type_: EventType::Warning,
+                            reason: "KeyProvisioningFailed".into(),
+                            note: Some(format!(
+                                "Failed to provision decryption key for machine {id}"
+                            )),
+                            action: "Provisioning".into(),
+                            secondary: None,
+                        },
+                        &machine_ref,
+                    )
+                    .await;
+                }
+                result
+                    .map(|_| LONG_REQUEUE)
+                    .map_err(|e| finalizer::Error::<ControllerError>::ApplyFailed(e.into()))
             }
             Event::Cleanup(machine) => {
-                let kube_client = Arc::unwrap_or_clone(client);
+                let machine_ref: ObjectReference = machine.object_ref(&());
+                let kube_client = ctx.client.clone();
                 let id = &machine.spec.id;
 
                 // Check if the TrustedExecutionCluster is being deleted
@@ -185,8 +225,22 @@ async fn keygen_reconcile(
                     }
                 }
 
-                trustee::unmount_secret(kube_client, id)
-                    .await
+                let result = trustee::unmount_secret(kube_client, id).await;
+                if result.is_ok() {
+                    publish_event(
+                        &recorder,
+                        &K8sEvent {
+                            type_: EventType::Normal,
+                            reason: "KeyRevoked".into(),
+                            note: Some(format!("Decryption key revoked for machine {id}")),
+                            action: "Revoking".into(),
+                            secondary: None,
+                        },
+                        &machine_ref,
+                    )
+                    .await;
+                }
+                result
                     .map(|_| LONG_REQUEUE)
                     .map_err(|e| finalizer::Error::<ControllerError>::CleanupFailed(e.into()))
             }
@@ -198,9 +252,13 @@ async fn keygen_reconcile(
 
 pub async fn launch_keygen_controller(client: Client) {
     let machines: Api<Machine> = Api::default_namespaced(client.clone());
+    let ctx = Arc::new(KeygenContext {
+        recorder: Some(new_recorder(client.clone(), "keygen-controller")),
+        client,
+    });
     tokio::spawn(
         Controller::new(machines, Default::default())
-            .run(keygen_reconcile, controller_error_policy, Arc::new(client))
+            .run(keygen_reconcile, controller_error_policy, ctx)
             .for_each(controller_info),
     );
 }

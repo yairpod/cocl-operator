@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, anyhow};
 use compute_pcrs_lib::Pcr;
 use futures_util::StreamExt;
+use k8s_openapi::api::core::v1::ObjectReference;
 use k8s_openapi::{
     api::{
         batch::v1::{Job, JobSpec},
@@ -17,6 +18,7 @@ use k8s_openapi::{
 use kube::api::{DeleteParams, ListParams, ObjectMeta, Patch};
 use kube::runtime::{
     controller::{Action, Controller},
+    events::{Event as K8sEvent, EventType, Recorder},
     finalizer,
     finalizer::Event,
     watcher,
@@ -32,8 +34,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use crate::COMPONENT_VERSION;
 use crate::trustee::{self, get_image_pcrs};
-use operator::{ControllerError, LONG_REQUEUE, upsert_condition};
-use operator::{controller_error_policy, controller_info, create_or_info_if_exists};
+use operator::{ControllerError, LONG_REQUEUE, publish_event, upsert_condition};
+use operator::{controller_error_policy, controller_info, create_or_info_if_exists, new_recorder};
 use trusted_cluster_operator_lib::{conditions::*, reference_values::*, *};
 
 const JOB_LABEL_KEY: &str = "kind";
@@ -42,6 +44,11 @@ const PCR_COMMAND_NAME: &str = "compute-pcrs";
 const PCR_LABEL: &str = "org.coreos.pcrs";
 /// Finalizer name to discard reference values when an image is no longer approved
 const APPROVED_IMAGE_FINALIZER: &str = "finalizer.approved-image.trusted-execution-clusters.io";
+
+struct RvContext {
+    client: Client,
+    recorder: Option<Recorder>,
+}
 
 /// Synchronize with compute_pcrs_cli::Output
 #[derive(Deserialize)]
@@ -115,12 +122,12 @@ fn build_compute_pcrs_pod_spec(
     }
 }
 
-async fn job_reconcile(job: Arc<Job>, client: Arc<Client>) -> Result<Action, ControllerError> {
+async fn job_reconcile(job: Arc<Job>, ctx: Arc<RvContext>) -> Result<Action, ControllerError> {
     let err = "Job changed, but had no name";
     let name = &job.metadata.name.clone().context(err)?;
     let err = format!("Job {name} changed, but had no status");
     let status = &job.status.clone().context(err)?;
-    let kube_client = Arc::unwrap_or_clone(client);
+    let kube_client = ctx.client.clone();
     if status.completion_time.is_none() {
         info!("Job {name} changed, but had not completed");
         return Ok(Action::requeue(Duration::from_secs(300)));
@@ -130,6 +137,33 @@ async fn job_reconcile(job: Arc<Job>, client: Arc<Client>) -> Result<Action, Con
     let delete = jobs.delete(name, &DeleteParams::foreground()).await;
     delete.map_err(Into::<anyhow::Error>::into)?;
     trustee::update_reference_values(kube_client).await?;
+    if let Some(owner) = job
+        .metadata
+        .owner_references
+        .as_ref()
+        .and_then(|refs| refs.iter().find(|r| r.kind == "ApprovedImage"))
+    {
+        let image_ref = ObjectReference {
+            api_version: Some(owner.api_version.clone()),
+            kind: Some(owner.kind.clone()),
+            name: Some(owner.name.clone()),
+            namespace: job.metadata.namespace.clone(),
+            uid: Some(owner.uid.clone()),
+            ..Default::default()
+        };
+        publish_event(
+            &ctx.recorder,
+            &K8sEvent {
+                type_: EventType::Normal,
+                reason: "ComputationCompleted".into(),
+                note: Some(format!("Reference values computed for {}", owner.name)),
+                action: "Computing".into(),
+                secondary: None,
+            },
+            &image_ref,
+        )
+        .await;
+    }
     Ok(Action::await_change())
 }
 
@@ -139,9 +173,13 @@ pub async fn launch_rv_job_controller(client: Client) {
         label_selector: Some(format!("{JOB_LABEL_KEY}={PCR_COMMAND_NAME}")),
         ..Default::default()
     };
+    let ctx = Arc::new(RvContext {
+        recorder: Some(new_recorder(client.clone(), "rv-controller")),
+        client,
+    });
     tokio::spawn(
         Controller::new(jobs, watcher)
-            .run(job_reconcile, controller_error_policy, Arc::new(client))
+            .run(job_reconcile, controller_error_policy, ctx)
             .for_each(controller_info),
     );
 }
@@ -238,9 +276,9 @@ pub async fn adopt_approved_images(
 
 async fn image_reconcile(
     image: Arc<ApprovedImage>,
-    client: Arc<Client>,
+    ctx: Arc<RvContext>,
 ) -> Result<Action, ControllerError> {
-    let kube_client = Arc::<Client>::unwrap_or_clone(client);
+    let kube_client = ctx.client.clone();
     let err = "ApprovedImage had no name";
     let name = image.metadata.name.clone().context(err)?;
     let cluster = get_opt_trusted_execution_cluster(kube_client.clone())
@@ -265,9 +303,10 @@ async fn image_reconcile(
     }
 
     let images: Api<ApprovedImage> = Api::default_namespaced(kube_client.clone());
+    let recorder = ctx.recorder.clone();
     finalizer(&images, APPROVED_IMAGE_FINALIZER, image, |ev| async {
         match ev {
-            Event::Apply(image) => image_add_reconcile(kube_client, &image, cluster)
+            Event::Apply(image) => image_add_reconcile(kube_client, &image, cluster, &recorder)
                 .await
                 .map_err(|e| finalizer::Error::<ControllerError>::ApplyFailed(e.into())),
             Event::Cleanup(image) => image_remove_reconcile(kube_client, image, cluster)
@@ -283,6 +322,7 @@ async fn image_add_reconcile(
     client: Client,
     image: &ApprovedImage,
     cluster: Option<TrustedExecutionCluster>,
+    recorder: &Option<Recorder>,
 ) -> Result<Action> {
     let name = image.metadata.name.as_ref().unwrap();
     let Some(cluster) = cluster else {
@@ -294,10 +334,39 @@ async fn image_add_reconcile(
         info!("TrustedExecutionCluster is being deleted, deferring image processing for {name}");
         return Ok(Action::requeue(Duration::from_secs(5)));
     }
+    let image_ref: ObjectReference = image.object_ref(&());
     let (action, reason) = match handle_new_image(client.clone(), image).await {
-        Ok(reason) => (LONG_REQUEUE, reason),
+        Ok(reason) => {
+            if reason == NOT_COMMITTED_REASON_COMPUTING {
+                publish_event(
+                    recorder,
+                    &K8sEvent {
+                        type_: EventType::Normal,
+                        reason: "ComputationStarted".into(),
+                        note: Some(format!("PCR computation started for {name}")),
+                        action: "Computing".into(),
+                        secondary: None,
+                    },
+                    &image_ref,
+                )
+                .await;
+            }
+            (LONG_REQUEUE, reason)
+        }
         Err(e) => {
             warn!("PCR computation for {name} failed: {e}");
+            publish_event(
+                recorder,
+                &K8sEvent {
+                    type_: EventType::Warning,
+                    reason: "ComputationFailed".into(),
+                    note: Some(format!("PCR computation for {name} failed: {e}")),
+                    action: "Computing".into(),
+                    secondary: None,
+                },
+                &image_ref,
+            )
+            .await;
             let action = Action::requeue(Duration::from_secs(60));
             (action, NOT_COMMITTED_REASON_FAILED)
         }
@@ -341,9 +410,13 @@ async fn image_remove_reconcile(
 
 pub async fn launch_rv_image_controller(client: Client) {
     let images: Api<ApprovedImage> = Api::default_namespaced(client.clone());
+    let ctx = Arc::new(RvContext {
+        recorder: Some(new_recorder(client.clone(), "rv-controller")),
+        client,
+    });
     tokio::spawn(
         Controller::new(images, Default::default())
-            .run(image_reconcile, controller_error_policy, Arc::new(client))
+            .run(image_reconcile, controller_error_policy, ctx)
             .for_each(controller_info),
     );
 }
@@ -502,7 +575,11 @@ mod tests {
         };
         count_check!(4, clos, |client| {
             let job = Arc::new(dummy_job());
-            let result = job_reconcile(job, Arc::new(client)).await.unwrap();
+            let ctx = Arc::new(RvContext {
+                client,
+                recorder: None,
+            });
+            let result = job_reconcile(job, ctx).await.unwrap();
             assert_eq!(result, Action::await_change());
         });
     }
@@ -514,7 +591,11 @@ mod tests {
             let mut job = dummy_job();
             let status = job.status.as_mut().unwrap();
             status.completion_time = None;
-            let result = job_reconcile(Arc::new(job), Arc::new(client)).await;
+            let ctx = Arc::new(RvContext {
+                client,
+                recorder: None,
+            });
+            let result = job_reconcile(Arc::new(job), ctx).await;
             assert_eq!(result.unwrap(), Action::requeue(Duration::from_secs(300)));
         });
     }
